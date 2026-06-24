@@ -1,0 +1,9 @@
+- destroy the myth of random guid fragmentation.
+- the use of random guids can actually prevent fragmentation! 
+- random guids actually behave in a manner like most people expect a good index to behave
+- actually see what an index looks like
+- lay waste to what people are currently calling best practice index maintenance
+- reorganize 
+- reorganize causes orders-of-magnitude worse transaction log file usage than rebuild
+- newsequentialid is probably not the answer that you're looking for.
+

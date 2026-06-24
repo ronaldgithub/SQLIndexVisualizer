@@ -1,0 +1,22 @@
+## .NET build outputs
+bin/
+obj/
+
+## User-specific files
+*.user
+*.suo
+.vs/
+
+## Rider / JetBrains
+.idea/
+
+## VS Code
+.vscode/
+
+## NuGet
+*.nupkg
+*.snupkg
+
+## OS
+Thumbs.db
+.DS_Store
