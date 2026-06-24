@@ -146,31 +146,43 @@ public class SqlServerService
 
         await using var reader = await cmd.ExecuteReaderAsync(CommandBehavior.Default, ct);
 
-        // First result set: header info
-        if (await reader.ReadAsync(ct))
+        // sp_IndexDNA runs DBCC PAGE in a loop via INSERT...EXEC, which can leak
+        // intermediate result sets to the client.  Scan every result set and
+        // identify it by its first column name rather than assuming position.
+        do
         {
-            info.ServerName  = reader["ServerName"]?.ToString()  ?? string.Empty;
-            info.DBName      = reader["DBName"]?.ToString()      ?? string.Empty;
-            info.SchemaName  = reader["SchemaName"]?.ToString()  ?? string.Empty;
-            info.ObjectName  = reader["ObjectName"]?.ToString()  ?? string.Empty;
-            info.IndexName   = reader["IndexName"]?.ToString()   ?? string.Empty;
-            info.SampleDT    = reader["SampleDT"]?.ToString()    ?? string.Empty;
-        }
+            if (reader.FieldCount == 0) continue;
 
-        // Second result set: page data
-        if (await reader.NextResultAsync(ct))
-        {
-            while (await reader.ReadAsync(ct))
+            var firstCol = reader.GetName(0);
+
+            if (firstCol == "ServerName" && string.IsNullOrEmpty(info.ServerName))
             {
-                pages.Add(new PageData
+                if (await reader.ReadAsync(ct))
                 {
-                    PageSort    = Convert.ToInt32(reader["PageSort"]),
-                    PageDensity = reader["PageDensity"] == DBNull.Value
-                                      ? 0
-                                      : Convert.ToDouble(reader["PageDensity"])
-                });
+                    info.ServerName = reader["ServerName"]?.ToString()  ?? string.Empty;
+                    info.DBName     = reader["DBName"]?.ToString()      ?? string.Empty;
+                    info.SchemaName = reader["SchemaName"]?.ToString()  ?? string.Empty;
+                    info.ObjectName = reader["ObjectName"]?.ToString()  ?? string.Empty;
+                    info.IndexName  = reader["IndexName"]?.ToString()   ?? string.Empty;
+                    info.SampleDT   = reader["SampleDT"]?.ToString()    ?? string.Empty;
+                }
             }
+            else if (firstCol == "PageSort" && pages.Count == 0)
+            {
+                while (await reader.ReadAsync(ct))
+                {
+                    pages.Add(new PageData
+                    {
+                        PageSort    = Convert.ToInt32(reader["PageSort"]),
+                        PageDensity = reader["PageDensity"] == DBNull.Value
+                                          ? 0
+                                          : Convert.ToDouble(reader["PageDensity"])
+                    });
+                }
+            }
+            // Any other result set (DBCC PAGE spillover, etc.) is intentionally skipped.
         }
+        while (await reader.NextResultAsync(ct));
 
         return (info, pages);
     }

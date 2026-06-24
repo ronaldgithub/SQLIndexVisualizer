@@ -140,9 +140,9 @@ public partial class MainWindow : Window
 
     private static IndexItem? GetIndexItemFromSender(object? sender)
     {
-        if (sender is MenuItem mi &&
-            mi.Parent is ContextMenu cm &&
-            cm.PlacementTarget?.DataContext is IndexItem idx)
+        // ContextMenu closes before Click fires, so mi.Parent is already detached.
+        // DataContext on the MenuItem is inherited from the DataTemplate and survives.
+        if (sender is MenuItem { DataContext: IndexItem idx })
             return idx;
         return null;
     }
@@ -170,23 +170,31 @@ public partial class MainWindow : Window
         var xs = pages.Select(p => (double)p.PageSort).ToArray();
         var ys = pages.Select(p => p.PageDensity).ToArray();
 
-        // Page density scatter points
-        var scatter        = plot.Add.ScatterPoints(xs, ys);
-        scatter.Color      = SPColor.FromHex("#569CD6");
-        scatter.MarkerSize = pages.Count > 5000 ? 2 : 3;
+        // Page density scatter — blue + markers
+        var scatter         = plot.Add.ScatterPoints(xs, ys);
+        scatter.Color       = SPColor.FromHex("#4472C4");
+        scatter.MarkerSize  = pages.Count > 5000 ? 3 : 5;
         scatter.MarkerShape = MarkerShape.Cross;
         scatter.LegendText  = "Page Density %";
 
-        // Rolling average line
-        int windowSize = Math.Max(3, pages.Count / 50);
-        var rolling    = _vm.CalculateRollingAverage(windowSize);
-        if (rolling.Count == xs.Length)
+        // Linear trend line (least-squares) — tells the story of page density across the index
+        double n    = xs.Length;
+        double sumX = xs.Sum();
+        double sumY = ys.Sum();
+        double sumXY = 0; for (int i = 0; i < xs.Length; i++) sumXY += xs[i] * ys[i];
+        double sumX2 = 0; for (int i = 0; i < xs.Length; i++) sumX2 += xs[i] * xs[i];
+        double denom = n * sumX2 - sumX * sumX;
+        if (Math.Abs(denom) > 1e-10)
         {
-            var line       = plot.Add.ScatterLine(xs, rolling.ToArray());
-            line.Color     = SPColor.FromHex("#FF9800");
-            line.LineWidth = 2;
-            line.LegendText = $"Rolling avg (w={windowSize})";
-            line.MarkerSize = 0;
+            double slope     = (n * sumXY - sumX * sumY) / denom;
+            double intercept = (sumY - slope * sumX) / n;
+            double xMin = xs[0];
+            double xMax = xs[xs.Length - 1];
+            var trend        = plot.Add.Line(xMin, slope * xMin + intercept,
+                                             xMax, slope * xMax + intercept);
+            trend.Color      = SPColor.FromHex("#E05252");
+            trend.LineWidth  = 1.5f;
+            trend.LegendText = $"Linear  (slope {slope:+0.0000;-0.0000} %/page)";
         }
 
         // Average density
@@ -208,10 +216,11 @@ public partial class MainWindow : Window
             ffLine.LegendText  = $"Fill factor: {ff}%";
         }
 
-        plot.XLabel("Page Sequence");
+        plot.XLabel("Logical Page Order");
         plot.YLabel("Page Density (%)");
         plot.Title(_vm.CurrentIndexInfo?.FullName ?? string.Empty);
         plot.Axes.SetLimitsY(0, 105);
+        plot.Axes.SetLimitsX(0, xs.Max());
 
         var legend = plot.ShowLegend();
         legend.Alignment = Alignment.UpperRight;

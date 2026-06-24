@@ -125,6 +125,9 @@
                     <TextBlock Text="{Binding StatusDb, StringFormat='◈ {0}'}"
                                Foreground="White" FontSize="12" VerticalAlignment="Center"
                                IsVisible="{Binding StatusDb, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"/>
+                    <TextBlock Text="{Binding TotalPagesSampled, StringFormat='▦ {0:N0} records'}"
+                               Foreground="White" FontSize="12" VerticalAlignment="Center"
+                               IsVisible="{Binding HasData}"/>
                 </StackPanel>
             </Grid>
         </Border>
