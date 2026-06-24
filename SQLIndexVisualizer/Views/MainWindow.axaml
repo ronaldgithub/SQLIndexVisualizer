@@ -290,6 +290,16 @@
                             <TextBlock Text="{Binding SelectedIndexItem.FillFactor, StringFormat='{}{0}%', FallbackValue='0%'}"
                                        FontSize="20" FontWeight="Bold" Foreground="#DCDCAA"/>
                         </StackPanel>
+                        <StackPanel Spacing="1">
+                            <TextBlock Text="Avg Free Space" FontSize="10" Foreground="#888"/>
+                            <TextBlock Text="{Binding AvgFragmentation, StringFormat='{}{0:F1}%'}"
+                                       FontSize="20" FontWeight="Bold" Foreground="#F14C4C"/>
+                        </StackPanel>
+                        <StackPanel Spacing="1" IsVisible="{Binding HasIndexFragmentation}">
+                            <TextBlock Text="Index Fragmentation" FontSize="10" Foreground="#888"/>
+                            <TextBlock Text="{Binding IndexFragmentation, StringFormat='{}{0:F1}%'}"
+                                       FontSize="20" FontWeight="Bold" Foreground="#CE9178"/>
+                        </StackPanel>
                     </StackPanel>
                 </Border>
 
@@ -322,25 +332,6 @@
                                     HorizontalAlignment="Center"
                                     Spacing="20"
                                     MaxWidth="540">
-
-                            <!-- Spinner ring -->
-                            <Border x:Name="SpinnerBorder"
-                                    Width="56" Height="56"
-                                    CornerRadius="28"
-                                    BorderThickness="5"
-                                    HorizontalAlignment="Center"
-                                    RenderTransformOrigin="0.5,0.5">
-                                <Border.BorderBrush>
-                                    <LinearGradientBrush StartPoint="0%,0%" EndPoint="100%,100%">
-                                        <GradientStop Color="#007ACC" Offset="0"/>
-                                        <GradientStop Color="#4EC9B0" Offset="0.55"/>
-                                        <GradientStop Color="Transparent" Offset="1"/>
-                                    </LinearGradientBrush>
-                                </Border.BorderBrush>
-                                <Border.RenderTransform>
-                                    <RotateTransform Angle="0"/>
-                                </Border.RenderTransform>
-                            </Border>
 
                             <TextBlock Text="Analyzing index pages…"
                                        FontSize="16" FontWeight="SemiBold"

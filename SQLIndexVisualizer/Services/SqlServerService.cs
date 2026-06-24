@@ -187,6 +187,22 @@ public class SqlServerService
         return (info, pages);
     }
 
+    public async Task<double> GetIndexFragmentationAsync(int objectId, int indexId, CancellationToken ct = default)
+    {
+        const string sql = """
+            SELECT TOP 1 avg_fragmentation_in_percent
+            FROM sys.dm_db_index_physical_stats(DB_ID(), @objectId, @indexId, NULL, 'LIMITED')
+            WHERE index_id = @indexId
+            """;
+        await using var conn = new SqlConnection(_dbConnectionString);
+        await conn.OpenAsync(ct);
+        await using var cmd = new SqlCommand(sql, conn) { CommandTimeout = 60 };
+        cmd.Parameters.AddWithValue("@objectId", objectId);
+        cmd.Parameters.AddWithValue("@indexId", indexId);
+        var result = await cmd.ExecuteScalarAsync(ct);
+        return result is DBNull or null ? -1.0 : Convert.ToDouble(result);
+    }
+
     public async Task ReorganizeIndexAsync(string schema, string table, string indexName,
         CancellationToken ct = default)
     {

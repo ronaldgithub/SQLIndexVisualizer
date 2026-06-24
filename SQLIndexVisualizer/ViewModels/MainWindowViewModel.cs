@@ -34,17 +34,26 @@ public partial class MainWindowViewModel : ViewModelBase
     // ── Analysis state ────────────────────────────────────────────────────────
     [ObservableProperty] private bool       _isAnalyzing;
     [ObservableProperty] private IndexInfo? _currentIndexInfo;
-    [ObservableProperty] private IndexItem? _selectedIndexItem;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasFillFactor))]
+    private IndexItem? _selectedIndexItem;
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(HasData))]
     [NotifyPropertyChangedFor(nameof(ShowEmptyState))]
+    [NotifyPropertyChangedFor(nameof(RollingWindowSize))]
     private List<PageData> _pageData = new();
 
-    [ObservableProperty] private double _avgPageDensity;
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(AvgFragmentation))]
+    private double _avgPageDensity;
     [ObservableProperty] private double _minPageDensity;
     [ObservableProperty] private double _maxPageDensity;
     [ObservableProperty] private int    _totalPagesSampled;
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasIndexFragmentation))]
+    private double _indexFragmentation = -1;
 
     // ── Analysis display ──────────────────────────────────────────────────────
     [ObservableProperty] private string _currentSql    = string.Empty;
@@ -59,8 +68,12 @@ public partial class MainWindowViewModel : ViewModelBase
     // ── Chart refresh trigger ─────────────────────────────────────────────────
     public event EventHandler? ChartDataChanged;
 
-    public bool HasData        => PageData.Count > 0;
-    public bool ShowEmptyState => !HasData && !IsAnalyzing;
+    public bool   HasData              => PageData.Count > 0;
+    public bool   ShowEmptyState       => !HasData && !IsAnalyzing;
+    public bool   HasFillFactor        => SelectedIndexItem?.FillFactor > 0;
+    public bool   HasIndexFragmentation => IndexFragmentation >= 0;
+    public double AvgFragmentation     => 100.0 - AvgPageDensity;
+    public int    RollingWindowSize    => Math.Max(5, PageData.Count / 100);
     public string ConnectButtonText => IsConnecting ? "⟳" : "Connect";
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -278,7 +291,13 @@ public partial class MainWindowViewModel : ViewModelBase
 
             CurrentSql = $"USE [{SelectedDatabase}]\r\nGO\r\nEXEC dbo.sp_IndexDNA\r\n    @pObjectID = {item.ObjectId},  -- {item.FullTableName}\r\n    @pIndexID  = {item.IndexId}     -- {item.IndexName}";
 
+            // Run fragmentation query in parallel — it's fast (LIMITED mode) and done long before sp_IndexDNA
+            var fragTask = _sqlService.GetIndexFragmentationAsync(item.ObjectId, item.IndexId, _cts.Token);
+
             var (info, pages) = await _sqlService.AnalyzeIndexAsync(item.ObjectId, item.IndexId, _cts.Token);
+
+            try   { IndexFragmentation = await fragTask; }
+            catch { IndexFragmentation = -1; }
 
             CurrentIndexInfo  = info;
             PageData          = pages;

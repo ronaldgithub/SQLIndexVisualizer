@@ -3,7 +3,6 @@ using System.ComponentModel;
 using System.Linq;
 using Avalonia.Controls;
 using Avalonia.Interactivity;
-using Avalonia.Media;
 using Avalonia.Threading;
 using ScottPlot;
 using SPColor = ScottPlot.Color;
@@ -17,11 +16,8 @@ public partial class MainWindow : Window
 {
     private MainWindowViewModel? _vm;
     private AvaPlot?             _chart;
-    private RotateTransform?     _spinnerTransform;
-    private DispatcherTimer?     _spinnerTimer;
     private DispatcherTimer?     _elapsedTimer;
     private DateTime             _analysisStart;
-    private double               _spinAngle;
 
     public MainWindow()
     {
@@ -34,9 +30,6 @@ public partial class MainWindow : Window
     {
         _chart = this.FindControl<AvaPlot>("IndexChart");
         if (_chart != null) ApplyDarkStyle(_chart.Plot);
-
-        var spinnerBorder = this.FindControl<Border>("SpinnerBorder");
-        _spinnerTransform = spinnerBorder?.RenderTransform as RotateTransform;
     }
 
     private void OnDataContextChanged(object? sender, EventArgs e)
@@ -70,17 +63,7 @@ public partial class MainWindow : Window
 
     private void StartSpinner()
     {
-        _spinAngle     = 0;
         _analysisStart = DateTime.Now;
-
-        _spinnerTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(16) };
-        _spinnerTimer.Tick += (_, _) =>
-        {
-            _spinAngle = (_spinAngle + 4) % 360;
-            if (_spinnerTransform != null)
-                _spinnerTransform.Angle = _spinAngle;
-        };
-        _spinnerTimer.Start();
 
         _elapsedTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
         _elapsedTimer.Tick += (_, _) =>
@@ -94,8 +77,6 @@ public partial class MainWindow : Window
 
     private void StopSpinner()
     {
-        _spinnerTimer?.Stop();
-        _spinnerTimer = null;
         _elapsedTimer?.Stop();
         _elapsedTimer = null;
         if (_vm != null) _vm.ElapsedSeconds = string.Empty;
@@ -163,6 +144,7 @@ public partial class MainWindow : Window
         var plot = _chart.Plot;
         plot.Clear();
         ApplyDarkStyle(plot);
+        plot.HideLegend();
 
         var pages = _vm.PageData;
         if (pages.Count == 0) { _chart.Refresh(); return; }
@@ -175,26 +157,18 @@ public partial class MainWindow : Window
         scatter.Color       = SPColor.FromHex("#4472C4");
         scatter.MarkerSize  = pages.Count > 5000 ? 3 : 5;
         scatter.MarkerShape = MarkerShape.Cross;
-        scatter.LegendText  = "Page Density %";
 
-        // Linear trend line (least-squares) — tells the story of page density across the index
-        double n    = xs.Length;
-        double sumX = xs.Sum();
-        double sumY = ys.Sum();
-        double sumXY = 0; for (int i = 0; i < xs.Length; i++) sumXY += xs[i] * ys[i];
-        double sumX2 = 0; for (int i = 0; i < xs.Length; i++) sumX2 += xs[i] * xs[i];
-        double denom = n * sumX2 - sumX * sumX;
-        if (Math.Abs(denom) > 1e-10)
+        // Rolling average — drawn on top of scatter; thicker so it shows through the dense cloud
+        int windowSize = Math.Max(5, pages.Count / 100);
+        var rolling    = _vm.CalculateRollingAverage(windowSize);
+        if (rolling.Count == xs.Length)
         {
-            double slope     = (n * sumXY - sumX * sumY) / denom;
-            double intercept = (sumY - slope * sumX) / n;
-            double xMin = xs[0];
-            double xMax = xs[xs.Length - 1];
-            var trend        = plot.Add.Line(xMin, slope * xMin + intercept,
-                                             xMax, slope * xMax + intercept);
-            trend.Color      = SPColor.FromHex("#E05252");
-            trend.LineWidth  = 1.5f;
-            trend.LegendText = $"Linear  (slope {slope:+0.0000;-0.0000} %/page)";
+            var ra         = plot.Add.Scatter(xs, rolling.ToArray());
+            ra.LineWidth   = 3f;
+            ra.MarkerSize  = 5;
+            ra.MarkerShape = MarkerShape.FilledCircle;
+            ra.LineColor   = SPColor.FromHex("#E05252");
+            ra.MarkerColor = SPColor.FromHex("#1A1A1A");
         }
 
         // Average density
@@ -203,7 +177,6 @@ public partial class MainWindow : Window
         avgLine.Color       = SPColor.FromHex("#4EC9B0");
         avgLine.LineWidth   = 1.5f;
         avgLine.LinePattern = LinePattern.Dashed;
-        avgLine.LegendText  = $"Avg: {avg:F1}%";
 
         // Fill factor
         int ff = _vm.SelectedIndexItem?.FillFactor ?? 0;
@@ -213,7 +186,6 @@ public partial class MainWindow : Window
             ffLine.Color       = SPColor.FromHex("#DCDCAA");
             ffLine.LineWidth   = 1.5f;
             ffLine.LinePattern = LinePattern.Dotted;
-            ffLine.LegendText  = $"Fill factor: {ff}%";
         }
 
         plot.XLabel("Logical Page Order");
@@ -221,9 +193,6 @@ public partial class MainWindow : Window
         plot.Title(_vm.CurrentIndexInfo?.FullName ?? string.Empty);
         plot.Axes.SetLimitsY(0, 105);
         plot.Axes.SetLimitsX(0, xs.Max());
-
-        var legend = plot.ShowLegend();
-        legend.Alignment = Alignment.UpperRight;
 
         _chart.Refresh();
     }
