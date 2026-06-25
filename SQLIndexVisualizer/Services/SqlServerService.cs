@@ -104,87 +104,43 @@ public class SqlServerService
         return new List<TableGroup>(groups.Values);
     }
 
-    public async Task<bool> CheckSpIndexDnaExistsAsync(CancellationToken ct = default)
-    {
-        const string sql = "SELECT COUNT(1) FROM master.sys.objects WHERE name = 'sp_IndexDNA' AND type = 'P'";
-        await using var conn = new SqlConnection(_masterConnectionString);
-        await conn.OpenAsync(ct);
-        await using var cmd = new SqlCommand(sql, conn);
-        var count = (int)(await cmd.ExecuteScalarAsync(ct))!;
-        return count > 0;
-    }
-
-    public async Task InstallSpIndexDnaAsync(CancellationToken ct = default)
-    {
-        await using var conn = new SqlConnection(_masterConnectionString);
-        await conn.OpenAsync(ct);
-
-        // Create the stored procedure in master
-        var createSql = GetSpIndexDnaSql();
-        await using var createCmd = new SqlCommand(createSql, conn) { CommandTimeout = 120 };
-        await createCmd.ExecuteNonQueryAsync(ct);
-
-        // Mark as system procedure so it can be called from any DB
-        await using var markCmd = new SqlCommand("EXEC sp_ms_marksystemobject 'sp_IndexDNA'", conn) { CommandTimeout = 30 };
-        await markCmd.ExecuteNonQueryAsync(ct);
-    }
-
-    public async Task<(IndexInfo info, List<PageData> pages)> AnalyzeIndexAsync(
+    public async Task<List<PageData>> AnalyzeIndexAsync(
         int objectId, int indexId, CancellationToken ct = default)
     {
+        var sql = $"""
+            DECLARE @pObjectID INT = {objectId};
+            DECLARE @pIndexID  INT = {indexId};
+
+            {IndexPageInfoSql}
+            """;
+
         await using var conn = new SqlConnection(_dbConnectionString);
         await conn.OpenAsync(ct);
-        await using var cmd = new SqlCommand("EXEC dbo.sp_IndexDNA @pObjectID, @pIndexID", conn)
-        {
-            CommandTimeout = 600
-        };
-        cmd.Parameters.AddWithValue("@pObjectID", objectId);
-        cmd.Parameters.AddWithValue("@pIndexID", indexId);
+        await using var cmd = new SqlCommand(sql, conn) { CommandTimeout = 600 };
 
-        var info  = new IndexInfo();
         var pages = new List<PageData>();
-
         await using var reader = await cmd.ExecuteReaderAsync(CommandBehavior.Default, ct);
 
-        // sp_IndexDNA runs DBCC PAGE in a loop via INSERT...EXEC, which can leak
-        // intermediate result sets to the client.  Scan every result set and
-        // identify it by its first column name rather than assuming position.
+        // IndexPageInfo may emit PRINT/intermediate output; scan for the final SELECT result set
+        // identified by its first column name.
         do
         {
             if (reader.FieldCount == 0) continue;
+            if (reader.GetName(0) != "PageSort") continue;
 
-            var firstCol = reader.GetName(0);
-
-            if (firstCol == "ServerName" && string.IsNullOrEmpty(info.ServerName))
+            while (await reader.ReadAsync(ct))
             {
-                if (await reader.ReadAsync(ct))
+                pages.Add(new PageData
                 {
-                    info.ServerName = reader["ServerName"]?.ToString()  ?? string.Empty;
-                    info.DBName     = reader["DBName"]?.ToString()      ?? string.Empty;
-                    info.SchemaName = reader["SchemaName"]?.ToString()  ?? string.Empty;
-                    info.ObjectName = reader["ObjectName"]?.ToString()  ?? string.Empty;
-                    info.IndexName  = reader["IndexName"]?.ToString()   ?? string.Empty;
-                    info.SampleDT   = reader["SampleDT"]?.ToString()    ?? string.Empty;
-                }
+                    PageSort    = Convert.ToInt32(reader["PageSort"]),
+                    PageDensity = reader["PageDensity"] is DBNull ? 0 : Convert.ToDouble(reader["PageDensity"]),
+                    PageRead    = reader["PageRead"]    is DBNull ? 0 : Convert.ToInt32(reader["PageRead"])
+                });
             }
-            else if (firstCol == "PageSort" && pages.Count == 0)
-            {
-                while (await reader.ReadAsync(ct))
-                {
-                    pages.Add(new PageData
-                    {
-                        PageSort    = Convert.ToInt32(reader["PageSort"]),
-                        PageDensity = reader["PageDensity"] == DBNull.Value
-                                          ? 0
-                                          : Convert.ToDouble(reader["PageDensity"])
-                    });
-                }
-            }
-            // Any other result set (DBCC PAGE spillover, etc.) is intentionally skipped.
         }
         while (await reader.NextResultAsync(ct));
 
-        return (info, pages);
+        return pages;
     }
 
     public async Task<double> GetIndexFragmentationAsync(int objectId, int indexId, CancellationToken ct = default)
@@ -211,11 +167,25 @@ public class SqlServerService
     }
 
     public async Task RebuildIndexAsync(string schema, string table, string indexName,
-        bool online, CancellationToken ct = default)
+        bool online, int fillFactor = 0, CancellationToken ct = default)
     {
-        var onlineOpt = online ? "WITH (ONLINE = ON)" : string.Empty;
-        var sql = $"ALTER INDEX [{indexName}] ON [{schema}].[{table}] REBUILD {onlineOpt}";
+        var opts = new System.Collections.Generic.List<string>();
+        if (online)      opts.Add("ONLINE = ON");
+        if (fillFactor > 0) opts.Add($"FILLFACTOR = {fillFactor}");
+        var withClause = opts.Count > 0 ? $"WITH ({string.Join(", ", opts)})" : string.Empty;
+        var sql = $"ALTER INDEX [{indexName}] ON [{schema}].[{table}] REBUILD {withClause}";
         await ExecuteDdlAsync(sql, ct);
+    }
+
+    public async Task ExecuteWithMessagesAsync(string sql, Action<string> onMessage,
+        bool useMasterConnection = false, CancellationToken ct = default)
+    {
+        var connStr = useMasterConnection ? _masterConnectionString : _dbConnectionString;
+        await using var conn = new SqlConnection(connStr);
+        conn.InfoMessage += (_, e) => onMessage(e.Message);
+        await conn.OpenAsync(ct);
+        await using var cmd = new SqlCommand(sql, conn) { CommandTimeout = 3600 };
+        await cmd.ExecuteNonQueryAsync(ct);
     }
 
     private async Task ExecuteDdlAsync(string sql, CancellationToken ct)
@@ -226,156 +196,142 @@ public class SqlServerService
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
-    private static string GetSpIndexDnaSql() => """
-        USE [master]
-        ;
-        CREATE OR ALTER PROCEDURE [dbo].[sp_IndexDNA]
-            @pObjectID INT
-           ,@pIndexID  INT
-        AS
-        SET NOCOUNT ON;
-        SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+    // Body of IndexPageInfo.sql without the top two DECLARE lines (those are prepended
+    // at call time with the actual objectId/indexId int values).
+    private const string IndexPageInfoSql = """
+        DROP TABLE IF EXISTS #IndexPageSpace;
+        DROP TABLE IF EXISTS #PageInfo;
 
-        IF OBJECT_ID('tempdb..#IndexPageSpace') IS NOT NULL DROP TABLE #IndexPageSpace;
-        IF OBJECT_ID('tempdb..#PageInfo')       IS NOT NULL DROP TABLE #PageInfo;
+        CREATE TABLE #IndexPageSpace(
+             PageSort    INT        NOT NULL
+            ,FileID      SMALLINT   NOT NULL
+            ,PageID      INT        NOT NULL
+            ,PageDensity FLOAT
+            ,PageRead    INT
+        );
 
-        CREATE TABLE #IndexPageSpace
-            (
-              PageSort      INT         NOT NULL
-            , FileID        SMALLINT    NOT NULL
-            , PageID        INT         NOT NULL
-            , PageDensity   FLOAT
-            )
-        ;
-        CREATE TABLE #PageInfo
-            (
-              ParentObject  VARCHAR(255)
-            , Object        VARCHAR(255)
-            , Field         VARCHAR(255)
-            , Value         VARCHAR(255)
-            )
-        ;
+        CREATE TABLE #PageInfo(
+             ParentObject   VARCHAR(255)
+            ,Object         VARCHAR(255)
+            ,Field          VARCHAR(255)
+            ,Value          VARCHAR(255)
+        );
 
-        DECLARE  @Counter           INT
-                ,@IndexColsCSV      NVARCHAR(4000)  = NULL
-                ,@LeafPageCount     INT
-                ,@MaxPageSort       INT
-                ,@Obj2PartName      NVARCHAR(261)   = QUOTENAME(OBJECT_SCHEMA_NAME(@pObjectID))
-                                                    + N'.'
-                                                    + QUOTENAME(OBJECT_NAME(@pObjectID))
-                ,@PageDensity       FLOAT
-                ,@PageFreeBytes     SMALLINT
-                ,@PageRowCount      SMALLINT
-                ,@PageUsedBytes     SMALLINT
-                ,@SampleSize        INT
-                ,@SQL               NVARCHAR(MAX)
-        ;
+        DECLARE
+             @Counter       INT
+            ,@IndexColsCSV  NVARCHAR(4000) = NULL
+            ,@LeafPageCount INT
+            ,@MaxPageSort   INT
+            ,@Obj2PartName  NVARCHAR(261)
+            ,@PageDensity   FLOAT
+            ,@PageFreeBytes SMALLINT
+            ,@PageRowCount  SMALLINT
+            ,@PageUsedBytes SMALLINT
+            ,@SampleSize    INT
+            ,@SQL           NVARCHAR(MAX)
+            ,@PageRead      INT;
 
-        SELECT  @LeafPageCount = in_row_used_page_count
-               ,@SampleSize    = POWER(10, CONVERT(INT, CEILING(LOG(@LeafPageCount) / LOG(10)) - 5))
-               ,@SampleSize    = CASE WHEN @SampleSize > 0 THEN @SampleSize ELSE 1 END
-          FROM  sys.dm_db_partition_stats
-         WHERE  object_id = @pObjectID
-           AND  index_id  = @pIndexID
-        ;
+        -- Build 2-part name
+        SET @Obj2PartName = QUOTENAME(OBJECT_SCHEMA_NAME(@pObjectID)) + N'.' + QUOTENAME(OBJECT_NAME(@pObjectID));
 
+        -- Get leaf page count and sample size
+        SELECT
+             @LeafPageCount = in_row_used_page_count
+            ,@SampleSize    = POWER(10, CEILING(LOG10(in_row_used_page_count)) - 5)
+        FROM sys.dm_db_partition_stats
+        WHERE object_id = @pObjectID
+          AND index_id  = @pIndexID;
+
+        SET @SampleSize = CASE WHEN @SampleSize > 0 THEN @SampleSize ELSE 1 END;
+
+        -- Build ORDER BY list from index key columns
         WITH cteIndexParts AS
         (
-          SELECT   idxcol.key_ordinal
-                  ,KeyColName = INDEX_COL(@Obj2PartName, @pIndexID, key_ordinal)
-                  ,Direction  = CASE WHEN idxcol.is_descending_key = 0 THEN N'ASC' ELSE N'DESC' END
-            FROM  sys.indexes             idx
-            JOIN  sys.index_columns       idxcol
-                      ON idx.object_id    = idxcol.object_id
-                     AND idx.index_id     = idxcol.index_id
-           WHERE  idx.object_id           = @pObjectID
-             AND  idx.index_id            = @pIndexID
-             AND  idxcol.key_ordinal      > 0
+            SELECT
+                 idxcol.key_ordinal
+                ,KeyColName = INDEX_COL(@Obj2PartName, @pIndexID, idxcol.key_ordinal)
+                ,Direction  = CASE WHEN idxcol.is_descending_key = 0 THEN N'ASC' ELSE N'DESC' END
+            FROM sys.index_columns idxcol
+            WHERE idxcol.object_id = @pObjectID
+              AND idxcol.index_id  = @pIndexID
+              AND idxcol.key_ordinal > 0
         )
-        SELECT @IndexColsCSV = ISNULL(@IndexColsCSV + N', ', '') + QUOTENAME(KeyColName) + ' ' + Direction
-          FROM cteIndexParts
-         ORDER BY key_ordinal
-        ;
+        SELECT @IndexColsCSV = STRING_AGG(QUOTENAME(KeyColName) + N' ' + Direction, N', ')
+               WITHIN GROUP (ORDER BY key_ordinal)
+        FROM cteIndexParts;
 
-        SELECT  ServerName  = @@SERVERNAME
-               ,DBName      = DB_NAME()
-               ,SchemaName  = OBJECT_SCHEMA_NAME(@pObjectID)
-               ,ObjectName  = OBJECT_NAME(@pObjectID)
-               ,IndexName   = (SELECT name FROM sys.indexes WHERE object_id = @pObjectID AND index_id = @pIndexID)
-               ,SampleDT    = CONVERT(CHAR(20), GETDATE(), 113)
-        ;
-
-        SELECT @SQL = REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(N'
-            WITH
-        cteBaseSortOrder AS
+        -- Build dynamic SQL
+        SET @SQL = N'
+        ;WITH cteBaseSortOrder AS
         (
-          SELECT   PhysLoc     = SUBSTRING(%%physloc%%, 1, 6)
-                  ,SortOrder   = ROW_NUMBER() OVER (ORDER BY <<@IndexColsCSV>>)
-            FROM  <<@Obj2PartName>> WITH (INDEX(<<@pIndexID>>))
-        )
-        ,cteLogicalPageOrder AS
+            SELECT
+                PhysLoc   = SUBSTRING(%%physloc%%,1,6),
+                SortOrder = ROW_NUMBER() OVER (ORDER BY ' + @IndexColsCSV + N')
+            FROM ' + @Obj2PartName + N' WITH (INDEX(' + CAST(@pIndexID AS nvarchar(10)) + N'))
+        ),
+        cteLogicalPageOrder AS
         (
-          SELECT   Physloc
-                  ,PageSort = ROW_NUMBER() OVER (ORDER BY MIN(SortOrder)) - 1
-            FROM  cteBaseSortOrder
-           GROUP BY PhysLoc
+            SELECT
+                PhysLoc,
+                PageSort = ROW_NUMBER() OVER (ORDER BY MIN(SortOrder)) - 1
+            FROM cteBaseSortOrder
+            GROUP BY PhysLoc
         )
-          INSERT INTO #IndexPageSpace WITH (TABLOCK)
-                      (PageSort, FileID, PageID)
-          SELECT   PageSort
-                  ,FileID  = CONVERT(SMALLINT, SUBSTRING(Physloc, 6, 1) + SUBSTRING(Physloc, 5, 1))
-                  ,PageID  = CONVERT(INT      , SUBSTRING(Physloc, 4, 1) + SUBSTRING(Physloc, 3, 1) + SUBSTRING(Physloc, 2, 1) + SUBSTRING(Physloc, 1, 1))
-            FROM  cteLogicalPageOrder
-           WHERE  PageSort % <<@SampleSize>> = 0
-        ;'
-                  , N'"'                    , N'''')
-                  , N'<<@IndexColsCSV>>'    , @IndexColsCSV)
-                  , N'<<@Obj2PartName>>'    , @Obj2PartName)
-                  , N'<<@pIndexID>>'        , CONVERT(NVARCHAR(10), @pIndexID))
-                  , N'<<@SampleSize>>'      , CONVERT(NVARCHAR(10), @SampleSize))
-        ;
-          EXEC (@SQL)
-        ;
-          ALTER TABLE #IndexPageSpace ADD PRIMARY KEY CLUSTERED (PageSort)
-        ;
+        INSERT INTO #IndexPageSpace WITH (TABLOCK)
+                (PageSort, FileID, PageID)
+        SELECT
+            PageSort,
+            FileID = CONVERT(smallint, SUBSTRING(PhysLoc,6,1) + SUBSTRING(PhysLoc,5,1)),
+            PageID = CONVERT(int,      SUBSTRING(PhysLoc,4,1) + SUBSTRING(PhysLoc,3,1)
+                                       + SUBSTRING(PhysLoc,2,1) + SUBSTRING(PhysLoc,1,1))
+        FROM cteLogicalPageOrder
+        WHERE PageSort % ' + CAST(@SampleSize AS nvarchar(10)) + N' = 0;
+        ';
 
-          SELECT  @MaxPageSort = MAX(PageSort)
-                 ,@Counter     = 0
-            FROM  #IndexPageSpace
-        ;
+        EXEC (@SQL);
 
-          WHILE @Counter <= @MaxPageSort
-          BEGIN
-                  TRUNCATE TABLE #PageInfo
-                  ;
-                  SELECT @SQL = REPLACE(REPLACE(REPLACE(
-                                          N'DBCC PAGE (<<DB_Name>>, <<FileID>>, <<PageID>>, 0) WITH NO_INFOMSGS, TABLERESULTS;'
-                                          , N'<<DB_Name>>', DB_NAME())
-                                          , N'<<FileID>>', CONVERT(NVARCHAR(10), FileID))
-                                          , N'<<PageID>>', CONVERT(NVARCHAR(10), PageID))
-                    FROM  #IndexPageSpace
-                   WHERE  PageSort = @Counter
-                  ;
-                  INSERT INTO #PageInfo (ParentObject, Object, Field, Value)
-                    EXEC (@SQL)
-                  ;
-                  SELECT  @PageRowCount   = MAX(CASE WHEN Field = N'm_slotCnt'  THEN VALUE ELSE 0 END)
-                         ,@PageFreeBytes  = MAX(CASE WHEN Field = N'm_freeCnt'  THEN VALUE ELSE 0 END)
-                         ,@PageUsedBytes  = 8096 - @PageFreeBytes
-                         ,@PageDensity    = @PageUsedBytes * 100.0 / 8096.0
-                    FROM  #PageInfo
-                  ;
-                  UPDATE #IndexPageSpace
-                     SET PageDensity = @PageDensity
-                   WHERE PageSort    = @Counter
-                  ;
-                  SELECT @Counter = @Counter + @SampleSize
-                  ;
-          END
-        ;
-          SELECT PageSort, PageDensity
+        -- Add PK for faster lookups
+        ALTER TABLE #IndexPageSpace ADD PRIMARY KEY CLUSTERED (PageSort);
+
+        -- Loop through sampled pages
+        SELECT
+             @MaxPageSort = MAX(PageSort)
+            ,@Counter     = 0
+        FROM #IndexPageSpace;
+
+        WHILE @Counter <= @MaxPageSort
+        BEGIN
+            TRUNCATE TABLE #PageInfo;
+
+            SELECT @SQL = N'DBCC PAGE (' + QUOTENAME(DB_NAME()) + N','
+                           + CAST(FileID AS nvarchar(10)) + N','
+                           + CAST(PageID AS nvarchar(10)) + N',0)
+                           WITH NO_INFOMSGS, TABLERESULTS;'
             FROM #IndexPageSpace
-           ORDER BY PageSort
-        ;
+            WHERE PageSort = @Counter;
+
+            INSERT INTO #PageInfo (ParentObject,Object,Field,Value)
+            EXEC (@SQL);
+
+            SELECT
+                 @PageRowCount  = MAX(CASE WHEN Field = N'm_slotCnt' THEN Value ELSE 0 END)
+                ,@PageFreeBytes = MAX(CASE WHEN Field = N'm_freeCnt' THEN Value ELSE 0 END)
+                ,@PageRead      = MAX(CASE WHEN Field = N'bReadMicroSec' THEN Value ELSE 0 END)
+                ,@PageUsedBytes = 8096 - @PageFreeBytes
+                ,@PageDensity   = (@PageUsedBytes * 100.0) / 8096.0
+            FROM #PageInfo;
+
+            UPDATE #IndexPageSpace
+               SET PageDensity = @PageDensity,
+                   PageRead    = @PageRead
+             WHERE PageSort    = @Counter;
+
+            SET @Counter += @SampleSize;
+        END;
+
+        -- Final output
+        SELECT PageSort, PageDensity, PageRead
+        FROM #IndexPageSpace
+        ORDER BY PageSort;
         """;
 }

@@ -20,8 +20,6 @@ GO
 ALTER TABLE [dbo].[GuidDemo01] ADD  DEFAULT (newid()) FOR [SomeGuid]
 GO
 
-
-
 insert into [dbo].[GuidDemo01]
 default values 
 go 30000

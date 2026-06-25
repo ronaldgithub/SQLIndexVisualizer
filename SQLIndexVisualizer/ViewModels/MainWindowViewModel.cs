@@ -4,6 +4,7 @@ using System.Collections.ObjectModel;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Avalonia.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using SQLIndexVisualizer.Models;
@@ -54,10 +55,18 @@ public partial class MainWindowViewModel : ViewModelBase
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(HasIndexFragmentation))]
     private double _indexFragmentation = -1;
+    [ObservableProperty] private double _avgPageRead;
 
     // ── Analysis display ──────────────────────────────────────────────────────
-    [ObservableProperty] private string _currentSql    = string.Empty;
+    [ObservableProperty] private string _currentSql     = string.Empty;
     [ObservableProperty] private string _elapsedSeconds = string.Empty;
+
+    // ── Maintenance ───────────────────────────────────────────────────────────
+    [ObservableProperty] private string _indexOptimizeSql     = string.Empty;
+    [ObservableProperty] private string _customSql            = "-- T-SQL runs against the selected database\r\n\r\nSELECT @@VERSION;";
+    [ObservableProperty] private int    _selectedTabIndex;
+    [ObservableProperty] private int    _maintenanceSubTabIndex;
+    public ObservableCollection<string> MaintenanceLog { get; } = new();
 
     // ── Status ────────────────────────────────────────────────────────────────
     [ObservableProperty] private string _statusText   = "Not connected. Enter server name and click Connect.";
@@ -68,13 +77,68 @@ public partial class MainWindowViewModel : ViewModelBase
     // ── Chart refresh trigger ─────────────────────────────────────────────────
     public event EventHandler? ChartDataChanged;
 
-    public bool   HasData              => PageData.Count > 0;
-    public bool   ShowEmptyState       => !HasData && !IsAnalyzing;
-    public bool   HasFillFactor        => SelectedIndexItem?.FillFactor > 0;
+    public bool   HasData               => PageData.Count > 0;
+    public bool   ShowEmptyState        => !HasData && !IsAnalyzing;
+    public bool   HasFillFactor         => SelectedIndexItem?.FillFactor > 0;
     public bool   HasIndexFragmentation => IndexFragmentation >= 0;
-    public double AvgFragmentation     => 100.0 - AvgPageDensity;
-    public int    RollingWindowSize    => Math.Max(5, PageData.Count / 100);
-    public string ConnectButtonText => IsConnecting ? "⟳" : "Connect";
+    public double AvgFragmentation      => 100.0 - AvgPageDensity;
+    public int    RollingWindowSize     => Math.Max(5, PageData.Count / 100);
+    public string ConnectButtonText     => IsConnecting ? "⟳" : "Connect";
+
+    partial void OnSelectedIndexItemChanged(IndexItem? value)
+    {
+        IndexOptimizeSql = BuildIndexOptimizeSql(value);
+        MaintenanceLog.Clear();
+    }
+
+    partial void OnSelectedDatabaseChanged(string? value)
+    {
+        IndexOptimizeSql = BuildIndexOptimizeSql(SelectedIndexItem);
+    }
+
+    private string BuildIndexOptimizeSql(IndexItem? item)
+    {
+        var db    = SelectedDatabase ?? "YourDatabase";
+        var idx   = item != null
+            ? $"{item.Schema}.{item.TableName}.{item.IndexName}"
+            : "Schema.Table.IndexName";
+
+        return $"""
+            EXEC master.dbo.IndexOptimize
+                @Databases                       = N'{db}',
+                @Indexes                         = N'{idx}',
+                @FragmentationLow                = NULL,
+                @FragmentationMedium             = N'INDEX_REORGANIZE,INDEX_REBUILD_ONLINE,INDEX_REBUILD_OFFLINE',
+                @FragmentationHigh               = N'INDEX_REBUILD_ONLINE,INDEX_REBUILD_OFFLINE',
+                @FragmentationLevel1             = 5,
+                @FragmentationLevel2             = 30,
+                @MinNumberOfPages                = 0,
+                @MaxNumberOfPages                = NULL,
+                @SortInTempdb                    = N'Y',
+                @MaxDOP                          = NULL,
+                @FillFactor                      = NULL,
+                @PadIndex                        = NULL,
+                @LOBCompaction                   = N'Y',
+                @UpdateStatistics                = NULL,
+                @OnlyModifiedStatistics          = N'N',
+                @StatisticsSample                = NULL,
+                @StatisticsResample              = N'N',
+                @PartitionLevel                  = N'Y',
+                @MSShippedObjects                = N'N',
+                @TimeLimit                       = NULL,
+                @Delay                           = NULL,
+                @WaitAtLowPriorityMaxDuration    = NULL,
+                @WaitAtLowPriorityAbortAfterWait = NULL,
+                @Resumable                       = N'N',
+                @LockTimeout                     = NULL,
+                @LockMessageSeverity             = 16,
+                @LogToTable                      = N'Y',
+                @Execute                         = N'Y';
+            """;
+    }
+
+    private void AppendLog(string message) =>
+        MaintenanceLog.Add($"[{DateTime.Now:HH:mm:ss}]  {message}");
 
     // ─────────────────────────────────────────────────────────────────────────
     //  Commands
@@ -169,107 +233,110 @@ public partial class MainWindowViewModel : ViewModelBase
     }
     private bool CanReAnalyze() => SelectedIndexItem != null && !IsAnalyzing;
 
-    [RelayCommand(CanExecute = nameof(CanMaintain))]
-    private async Task ReorganizeAsync()
+    [RelayCommand(CanExecute = nameof(CanExecuteOptimize))]
+    private async Task ExecuteIndexOptimizeAsync()
     {
-        if (SelectedIndexItem == null) return;
-        var item = SelectedIndexItem;
+        if (string.IsNullOrWhiteSpace(IndexOptimizeSql)) return;
 
-        IsAnalyzing = true;
-        StatusText  = $"Reorganizing {item.FullTableName}.[{item.IndexName}]...";
-        HasError    = false;
+        SelectedTabIndex = 1;
+        IsAnalyzing      = true;
+        HasError         = false;
+        MaintenanceLog.Clear();
+        AppendLog("Executing dbo.IndexOptimize…");
+        StatusText = "Running IndexOptimize…";
 
         try
         {
             _cts = new CancellationTokenSource();
-            await _sqlService.ReorganizeIndexAsync(item.Schema, item.TableName, item.IndexName, _cts.Token);
-            StatusText = "Reorganize complete. Re-analyzing...";
-            await RunAnalysisAsync(item);
+            await _sqlService.ExecuteWithMessagesAsync(
+                IndexOptimizeSql,
+                msg =>
+                {
+                    if (!string.IsNullOrWhiteSpace(msg))
+                        Dispatcher.UIThread.Post(() => AppendLog(msg));
+                },
+                useMasterConnection: true,
+                _cts.Token);
+
+            AppendLog("IndexOptimize complete.");
+            StatusText = "IndexOptimize complete.";
+        }
+        catch (OperationCanceledException)
+        {
+            AppendLog("Cancelled.");
+            StatusText = "Operation cancelled.";
         }
         catch (Exception ex)
         {
-            HasError    = true;
-            StatusText  = $"Reorganize failed: {ex.Message}";
+            AppendLog($"Error: {ex.Message}");
+            HasError   = true;
+            StatusText = $"IndexOptimize failed: {ex.Message}";
+        }
+        finally
+        {
             IsAnalyzing = false;
+            ReAnalyzeCommand.NotifyCanExecuteChanged();
+            ExecuteIndexOptimizeCommand.NotifyCanExecuteChanged();
         }
     }
+    private bool CanExecuteOptimize() => !string.IsNullOrWhiteSpace(IndexOptimizeSql) && !IsAnalyzing;
 
-    [RelayCommand(CanExecute = nameof(CanMaintain))]
-    private async Task RebuildAsync()
+    [RelayCommand(CanExecute = nameof(CanExecuteTsql))]
+    private async Task ExecuteTsqlAsync()
     {
-        if (SelectedIndexItem == null) return;
-        var item = SelectedIndexItem;
+        if (string.IsNullOrWhiteSpace(CustomSql)) return;
 
-        IsAnalyzing = true;
-        StatusText  = $"Rebuilding {item.FullTableName}.[{item.IndexName}]...";
-        HasError    = false;
+        SelectedTabIndex         = 1;
+        MaintenanceSubTabIndex   = 1;
+        IsAnalyzing              = true;
+        HasError                 = false;
+        MaintenanceLog.Clear();
+        AppendLog($"Executing T-SQL against [{SelectedDatabase}]…");
+        StatusText = $"Running T-SQL against {SelectedDatabase}…";
 
         try
         {
             _cts = new CancellationTokenSource();
-            await _sqlService.RebuildIndexAsync(item.Schema, item.TableName, item.IndexName,
-                online: false, _cts.Token);
-            StatusText = "Rebuild complete. Re-analyzing...";
-            await RunAnalysisAsync(item);
+            await _sqlService.ExecuteWithMessagesAsync(
+                CustomSql,
+                msg =>
+                {
+                    if (!string.IsNullOrWhiteSpace(msg))
+                        Dispatcher.UIThread.Post(() => AppendLog(msg));
+                },
+                useMasterConnection: false,
+                _cts.Token);
+
+            AppendLog("Done.");
+            StatusText = "T-SQL complete.";
+        }
+        catch (OperationCanceledException)
+        {
+            AppendLog("Cancelled.");
+            StatusText = "Operation cancelled.";
         }
         catch (Exception ex)
         {
-            HasError    = true;
-            StatusText  = $"Rebuild failed: {ex.Message}";
+            AppendLog($"Error: {ex.Message}");
+            HasError   = true;
+            StatusText = $"T-SQL failed: {ex.Message}";
+        }
+        finally
+        {
             IsAnalyzing = false;
+            ReAnalyzeCommand.NotifyCanExecuteChanged();
+            ExecuteIndexOptimizeCommand.NotifyCanExecuteChanged();
+            ExecuteTsqlCommand.NotifyCanExecuteChanged();
         }
     }
-
-    [RelayCommand(CanExecute = nameof(CanMaintain))]
-    private async Task RebuildOnlineAsync()
-    {
-        if (SelectedIndexItem == null) return;
-        var item = SelectedIndexItem;
-
-        IsAnalyzing = true;
-        StatusText  = $"Rebuilding (ONLINE) {item.FullTableName}.[{item.IndexName}]...";
-        HasError    = false;
-
-        try
-        {
-            _cts = new CancellationTokenSource();
-            await _sqlService.RebuildIndexAsync(item.Schema, item.TableName, item.IndexName,
-                online: true, _cts.Token);
-            StatusText = "Online rebuild complete. Re-analyzing...";
-            await RunAnalysisAsync(item);
-        }
-        catch (Exception ex)
-        {
-            HasError    = true;
-            StatusText  = $"Online rebuild failed: {ex.Message}";
-            IsAnalyzing = false;
-        }
-    }
-
-    private bool CanMaintain() => SelectedIndexItem != null && !IsAnalyzing;
+    private bool CanExecuteTsql() => !string.IsNullOrWhiteSpace(CustomSql) && !IsAnalyzing
+                                      && !string.IsNullOrEmpty(SelectedDatabase);
 
     [RelayCommand]
     private void CancelOperation()
     {
         _cts?.Cancel();
         StatusText = "Operation cancelled.";
-    }
-
-    [RelayCommand]
-    private async Task InstallSpIndexDnaAsync()
-    {
-        StatusText = "Installing sp_IndexDNA in master...";
-        HasError   = false;
-        try
-        {
-            await _sqlService.InstallSpIndexDnaAsync();
-            StatusText = "sp_IndexDNA installed successfully.";
-        }
-        catch (Exception ex)
-        {
-            HasError   = true;
-            StatusText = $"Install failed: {ex.Message}";
-        }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -289,17 +356,25 @@ public partial class MainWindowViewModel : ViewModelBase
         {
             _cts = new CancellationTokenSource();
 
-            CurrentSql = $"USE [{SelectedDatabase}]\r\nGO\r\nEXEC dbo.sp_IndexDNA\r\n    @pObjectID = {item.ObjectId},  -- {item.FullTableName}\r\n    @pIndexID  = {item.IndexId}     -- {item.IndexName}";
+            CurrentSql = $"-- Table: {item.FullTableName}  Index: [{item.IndexName}] (ID: {item.IndexId})\r\nDECLARE @pObjectID INT = {item.ObjectId};\r\nDECLARE @pIndexID  INT = {item.IndexId};";
 
-            // Run fragmentation query in parallel — it's fast (LIMITED mode) and done long before sp_IndexDNA
             var fragTask = _sqlService.GetIndexFragmentationAsync(item.ObjectId, item.IndexId, _cts.Token);
 
-            var (info, pages) = await _sqlService.AnalyzeIndexAsync(item.ObjectId, item.IndexId, _cts.Token);
+            var pages = await _sqlService.AnalyzeIndexAsync(item.ObjectId, item.IndexId, _cts.Token);
 
             try   { IndexFragmentation = await fragTask; }
             catch { IndexFragmentation = -1; }
 
-            CurrentIndexInfo  = info;
+            CurrentIndexInfo = new IndexInfo
+            {
+                ServerName = ServerName,
+                DBName     = SelectedDatabase ?? string.Empty,
+                SchemaName = item.Schema,
+                ObjectName = item.TableName,
+                IndexName  = item.IndexName,
+                SampleDT   = DateTime.Now.ToString("dd MMM yyyy HH:mm:ss")
+            };
+
             PageData          = pages;
             TotalPagesSampled = pages.Count;
 
@@ -308,6 +383,7 @@ public partial class MainWindowViewModel : ViewModelBase
                 AvgPageDensity = pages.Average(p => p.PageDensity);
                 MinPageDensity = pages.Min(p => p.PageDensity);
                 MaxPageDensity = pages.Max(p => p.PageDensity);
+                AvgPageRead    = pages.Average(p => p.PageRead);
             }
 
             StatusText = $"{ServerName} | {SelectedDatabase} | {item.FullTableName} → [{item.IndexName}]  " +
@@ -328,9 +404,8 @@ public partial class MainWindowViewModel : ViewModelBase
         {
             IsAnalyzing = false;
             ReAnalyzeCommand.NotifyCanExecuteChanged();
-            ReorganizeCommand.NotifyCanExecuteChanged();
-            RebuildCommand.NotifyCanExecuteChanged();
-            RebuildOnlineCommand.NotifyCanExecuteChanged();
+            ExecuteIndexOptimizeCommand.NotifyCanExecuteChanged();
+            ExecuteTsqlCommand.NotifyCanExecuteChanged();
         }
     }
 

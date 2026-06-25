@@ -10,7 +10,7 @@
         x:DataType="vm:MainWindowViewModel"
         x:Name="RootWindow"
         Icon="/Assets/avalonia-logo.ico"
-        Title="SQL Index DNA Visualizer"
+        Title="SQL Index Visualizer"
         MinWidth="900" MinHeight="600"
         Width="1280" Height="800"
         Background="#1E1E1E">
@@ -101,6 +101,20 @@
         <Style Selector="TreeViewItem">
             <Setter Property="Foreground"   Value="{StaticResource TextPrimary}"/>
             <Setter Property="Background"   Value="Transparent"/>
+        </Style>
+        <Style Selector="NumericUpDown">
+            <Setter Property="Background"   Value="#3C3C3C"/>
+            <Setter Property="Foreground"   Value="{StaticResource TextPrimary}"/>
+            <Setter Property="BorderBrush"  Value="#555"/>
+        </Style>
+        <Style Selector="TabItem">
+            <Setter Property="FontSize"     Value="12"/>
+            <Setter Property="Padding"      Value="14,8"/>
+            <Setter Property="Foreground"   Value="#888"/>
+            <Setter Property="Background"   Value="Transparent"/>
+        </Style>
+        <Style Selector="TabItem:selected">
+            <Setter Property="Foreground"   Value="White"/>
         </Style>
     </Window.Styles>
 
@@ -222,7 +236,7 @@
                         Padding="14,10">
                     <Grid ColumnDefinitions="*,Auto">
                         <StackPanel Grid.Column="0" Spacing="2">
-                            <TextBlock Text="{Binding CurrentIndexInfo.FullName, FallbackValue='SQL Index DNA Visualizer'}"
+                            <TextBlock Text="{Binding CurrentIndexInfo.FullName, FallbackValue='SQL Index Visualizer'}"
                                        FontSize="16" FontWeight="Bold" Foreground="White"/>
                             <StackPanel Orientation="Horizontal" Spacing="16">
                                 <TextBlock Text="{Binding CurrentIndexInfo.ServerName, StringFormat='Server: {0}', FallbackValue=''}"
@@ -240,15 +254,6 @@
                             <Button Content="⟳  Re-Analyze"
                                     Command="{Binding ReAnalyzeCommand}"
                                     Classes="accent" FontSize="12"/>
-                            <Button Content="Reorganize"
-                                    Command="{Binding ReorganizeCommand}"
-                                    Classes="warning" FontSize="12"/>
-                            <Button Content="Rebuild"
-                                    Command="{Binding RebuildCommand}"
-                                    Classes="warning" FontSize="12"/>
-                            <Button Content="Rebuild Online"
-                                    Command="{Binding RebuildOnlineCommand}"
-                                    Classes="success" FontSize="12"/>
                             <Button Content="✕ Cancel"
                                     Command="{Binding CancelOperationCommand}"
                                     IsVisible="{Binding IsAnalyzing}"
@@ -300,92 +305,238 @@
                             <TextBlock Text="{Binding IndexFragmentation, StringFormat='{}{0:F1}%'}"
                                        FontSize="20" FontWeight="Bold" Foreground="#CE9178"/>
                         </StackPanel>
+                        <StackPanel Spacing="1">
+                            <TextBlock Text="Avg Page Read" FontSize="10" Foreground="#888"/>
+                            <TextBlock Text="{Binding AvgPageRead, StringFormat='{}{0:N0} µs'}"
+                                       FontSize="20" FontWeight="Bold" Foreground="#B8D7A3"/>
+                        </StackPanel>
                     </StackPanel>
                 </Border>
 
-                <!-- ── Chart area ── -->
-                <Grid>
-                    <!-- ScottPlot chart – always in the visual tree so it initialises properly -->
-                    <sp:AvaPlot x:Name="IndexChart"/>
+                <!-- ── Tab area: Analysis | Maintenance ── -->
+                <TabControl SelectedIndex="{Binding SelectedTabIndex}"
+                            Background="#1E1E1E"
+                            Padding="0">
 
-                    <!-- Empty / Welcome state – opaque background covers the chart -->
-                    <Border Background="#1E1E1E" IsVisible="{Binding ShowEmptyState}">
-                        <StackPanel VerticalAlignment="Center"
-                                    HorizontalAlignment="Center"
-                                    Spacing="12">
-                            <TextBlock Text="📊" FontSize="72" HorizontalAlignment="Center"/>
-                            <TextBlock Text="SQL Index DNA Visualizer"
-                                       FontSize="24" FontWeight="Bold"
-                                       HorizontalAlignment="Center" Foreground="White"/>
-                            <TextBlock Text="1.  Connect to a SQL Server"
-                                       FontSize="14" HorizontalAlignment="Center" Foreground="#666"/>
-                            <TextBlock Text="2.  Select a database and click Load"
-                                       FontSize="14" HorizontalAlignment="Center" Foreground="#666"/>
-                            <TextBlock Text="3.  Right-click an index → Analyze Index"
-                                       FontSize="14" HorizontalAlignment="Center" Foreground="#666"/>
-                        </StackPanel>
-                    </Border>
+                    <!-- ── Tab 0: Analysis (chart) ── -->
+                    <TabItem Header="Analysis">
+                        <Grid>
+                            <!-- ScottPlot chart – always in the visual tree so it initialises properly -->
+                            <sp:AvaPlot x:Name="IndexChart"/>
 
-                    <!-- Analyzing state – opaque background covers the chart -->
-                    <Border Background="#1E1E1E" IsVisible="{Binding IsAnalyzing}">
-                        <StackPanel VerticalAlignment="Center"
-                                    HorizontalAlignment="Center"
-                                    Spacing="20"
-                                    MaxWidth="540">
-
-                            <TextBlock Text="Analyzing index pages…"
-                                       FontSize="16" FontWeight="SemiBold"
-                                       HorizontalAlignment="Center"
-                                       Foreground="White"/>
-
-                            <TextBlock Text="{Binding ElapsedSeconds}"
-                                       FontSize="12"
-                                       HorizontalAlignment="Center"
-                                       Foreground="#888"/>
-
-                            <!-- SQL code block -->
-                            <Border Background="#0D1117"
-                                    BorderBrush="#30363D"
-                                    BorderThickness="1"
-                                    CornerRadius="6"
-                                    Padding="16,12">
-                                <StackPanel Spacing="4">
-                                    <TextBlock Text="Executing:"
-                                               FontSize="10"
-                                               Foreground="#6E7681"
-                                               FontWeight="Bold"
-                                               LetterSpacing="1"/>
-                                    <TextBlock Text="{Binding CurrentSql}"
-                                               FontFamily="Cascadia Code, Consolas, Courier New, monospace"
-                                               FontSize="13"
-                                               Foreground="#8BE9FD"
-                                               TextWrapping="Wrap"/>
+                            <!-- Empty / Welcome state – opaque background covers the chart -->
+                            <Border Background="#1E1E1E" IsVisible="{Binding ShowEmptyState}">
+                                <StackPanel VerticalAlignment="Center"
+                                            HorizontalAlignment="Center"
+                                            Spacing="12">
+                                    <TextBlock Text="📊" FontSize="72" HorizontalAlignment="Center"/>
+                                    <TextBlock Text="SQL Index Visualizer"
+                                               FontSize="24" FontWeight="Bold"
+                                               HorizontalAlignment="Center" Foreground="White"/>
+                                    <TextBlock Text="1.  Connect to a SQL Server"
+                                               FontSize="14" HorizontalAlignment="Center" Foreground="#666"/>
+                                    <TextBlock Text="2.  Select a database and click Load"
+                                               FontSize="14" HorizontalAlignment="Center" Foreground="#666"/>
+                                    <TextBlock Text="3.  Right-click an index → Analyze Index"
+                                               FontSize="14" HorizontalAlignment="Center" Foreground="#666"/>
                                 </StackPanel>
                             </Border>
 
-                            <TextBlock Text="This may take several minutes for large indexes."
-                                       FontSize="11"
-                                       HorizontalAlignment="Center"
-                                       Foreground="#555"/>
-                        </StackPanel>
-                    </Border>
+                            <!-- Analyzing state – opaque background covers the chart -->
+                            <Border Background="#1E1E1E" IsVisible="{Binding IsAnalyzing}">
+                                <StackPanel VerticalAlignment="Center"
+                                            HorizontalAlignment="Center"
+                                            Spacing="20"
+                                            MaxWidth="540">
 
-                    <!-- Error state -->
-                    <Border IsVisible="{Binding HasError}"
-                            VerticalAlignment="Center"
-                            HorizontalAlignment="Center"
-                            Background="#3C1F1F"
-                            BorderBrush="#F14C4C"
-                            BorderThickness="1"
-                            CornerRadius="6"
-                            Padding="20,14"
-                            MaxWidth="620">
-                        <TextBlock Text="{Binding StatusText}"
-                                   Foreground="#F14C4C"
-                                   FontSize="13"
-                                   TextWrapping="Wrap"/>
-                    </Border>
-                </Grid>
+                                    <TextBlock Text="Analyzing index pages…"
+                                               FontSize="16" FontWeight="SemiBold"
+                                               HorizontalAlignment="Center"
+                                               Foreground="White"/>
+
+                                    <TextBlock Text="{Binding ElapsedSeconds}"
+                                               FontSize="12"
+                                               HorizontalAlignment="Center"
+                                               Foreground="#888"/>
+
+                                    <!-- SQL code block -->
+                                    <Border Background="#0D1117"
+                                            BorderBrush="#30363D"
+                                            BorderThickness="1"
+                                            CornerRadius="6"
+                                            Padding="16,12">
+                                        <StackPanel Spacing="4">
+                                            <TextBlock Text="Executing:"
+                                                       FontSize="10"
+                                                       Foreground="#6E7681"
+                                                       FontWeight="Bold"
+                                                       LetterSpacing="1"/>
+                                            <TextBlock Text="{Binding CurrentSql}"
+                                                       FontFamily="Cascadia Code, Consolas, Courier New, monospace"
+                                                       FontSize="13"
+                                                       Foreground="#8BE9FD"
+                                                       TextWrapping="Wrap"/>
+                                        </StackPanel>
+                                    </Border>
+
+                                    <TextBlock Text="This may take several minutes for large indexes."
+                                               FontSize="11"
+                                               HorizontalAlignment="Center"
+                                               Foreground="#555"/>
+                                </StackPanel>
+                            </Border>
+
+                            <!-- Error state -->
+                            <Border IsVisible="{Binding HasError}"
+                                    VerticalAlignment="Center"
+                                    HorizontalAlignment="Center"
+                                    Background="#3C1F1F"
+                                    BorderBrush="#F14C4C"
+                                    BorderThickness="1"
+                                    CornerRadius="6"
+                                    Padding="20,14"
+                                    MaxWidth="620">
+                                <TextBlock Text="{Binding StatusText}"
+                                           Foreground="#F14C4C"
+                                           FontSize="13"
+                                           TextWrapping="Wrap"/>
+                            </Border>
+                        </Grid>
+                    </TabItem>
+
+                    <!-- ── Tab 1: Maintenance ── -->
+                    <TabItem Header="Maintenance">
+                        <Grid RowDefinitions="*,180">
+
+                            <!-- ── Inner sub-tabs: Ola | T-SQL ── -->
+                            <TabControl Grid.Row="0"
+                                        SelectedIndex="{Binding MaintenanceSubTabIndex}"
+                                        Background="#1E1E1E"
+                                        Padding="0">
+
+                                <!-- Ola IndexOptimize -->
+                                <TabItem Header="Ola">
+                                    <DockPanel>
+                                        <!-- Execute strip -->
+                                        <Border DockPanel.Dock="Bottom"
+                                                Background="#252526"
+                                                BorderBrush="#3C3C3C"
+                                                BorderThickness="0,1,0,0"
+                                                Padding="16,10">
+                                            <StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+                                                <Button Content="▶  Execute"
+                                                        Command="{Binding ExecuteIndexOptimizeCommand}"
+                                                        Classes="accent"
+                                                        FontSize="13"
+                                                        FontWeight="SemiBold"
+                                                        Padding="18,7"/>
+                                                <Button Content="✕ Cancel"
+                                                        Command="{Binding CancelOperationCommand}"
+                                                        IsVisible="{Binding IsAnalyzing}"
+                                                        FontSize="12"/>
+                                                <TextBlock Text="{Binding ElapsedSeconds}"
+                                                           FontSize="11" Foreground="#888"
+                                                           VerticalAlignment="Center"
+                                                           Margin="6,0,0,0"/>
+                                            </StackPanel>
+                                        </Border>
+                                        <!-- Editable IndexOptimize SQL -->
+                                        <Border Background="#0D1117"
+                                                BorderBrush="#30363D"
+                                                BorderThickness="0">
+                                            <TextBox Text="{Binding IndexOptimizeSql}"
+                                                     AcceptsReturn="True"
+                                                     TextWrapping="NoWrap"
+                                                     FontFamily="Cascadia Code,Consolas,Courier New"
+                                                     FontSize="13"
+                                                     Foreground="#8BE9FD"
+                                                     Background="Transparent"
+                                                     BorderThickness="0"
+                                                     CaretBrush="White"
+                                                     SelectionBrush="#264F78"
+                                                     Padding="16,12"
+                                                     ScrollViewer.VerticalScrollBarVisibility="Auto"
+                                                     ScrollViewer.HorizontalScrollBarVisibility="Auto"/>
+                                        </Border>
+                                    </DockPanel>
+                                </TabItem>
+
+                                <!-- Free-form T-SQL -->
+                                <TabItem Header="T-SQL">
+                                    <DockPanel>
+                                        <!-- Execute strip -->
+                                        <Border DockPanel.Dock="Bottom"
+                                                Background="#252526"
+                                                BorderBrush="#3C3C3C"
+                                                BorderThickness="0,1,0,0"
+                                                Padding="16,10">
+                                            <StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+                                                <Button Content="▶  Execute"
+                                                        Command="{Binding ExecuteTsqlCommand}"
+                                                        Classes="accent"
+                                                        FontSize="13"
+                                                        FontWeight="SemiBold"
+                                                        Padding="18,7"/>
+                                                <Button Content="✕ Cancel"
+                                                        Command="{Binding CancelOperationCommand}"
+                                                        IsVisible="{Binding IsAnalyzing}"
+                                                        FontSize="12"/>
+                                                <TextBlock Text="{Binding ElapsedSeconds}"
+                                                           FontSize="11" Foreground="#888"
+                                                           VerticalAlignment="Center"
+                                                           Margin="6,0,0,0"/>
+                                                <TextBlock Text="{Binding SelectedDatabase, StringFormat='  db: {0}'}"
+                                                           FontSize="11" Foreground="#4EC9B0"
+                                                           VerticalAlignment="Center"/>
+                                            </StackPanel>
+                                        </Border>
+                                        <!-- Editable free-form SQL -->
+                                        <Border Background="#0D1117"
+                                                BorderBrush="#30363D"
+                                                BorderThickness="0">
+                                            <TextBox Text="{Binding CustomSql}"
+                                                     AcceptsReturn="True"
+                                                     TextWrapping="NoWrap"
+                                                     FontFamily="Cascadia Code,Consolas,Courier New"
+                                                     FontSize="13"
+                                                     Foreground="#CE9178"
+                                                     Background="Transparent"
+                                                     BorderThickness="0"
+                                                     CaretBrush="White"
+                                                     SelectionBrush="#264F78"
+                                                     Padding="16,12"
+                                                     ScrollViewer.VerticalScrollBarVisibility="Auto"
+                                                     ScrollViewer.HorizontalScrollBarVisibility="Auto"/>
+                                        </Border>
+                                    </DockPanel>
+                                </TabItem>
+
+                            </TabControl>
+
+                            <!-- Shared output log -->
+                            <ScrollViewer x:Name="LogScrollViewer"
+                                          Grid.Row="1"
+                                          VerticalScrollBarVisibility="Auto"
+                                          HorizontalScrollBarVisibility="Disabled"
+                                          Background="#111111">
+                                <ItemsControl ItemsSource="{Binding MaintenanceLog}"
+                                              Padding="16,10">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <TextBlock Text="{Binding}"
+                                                       FontFamily="Cascadia Code,Consolas,Courier New"
+                                                       FontSize="11"
+                                                       Foreground="#A8FF78"
+                                                       Padding="0,1"/>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                            </ScrollViewer>
+
+                        </Grid>
+                    </TabItem>
+
+                </TabControl>
             </DockPanel>
         </Grid>
     </DockPanel>

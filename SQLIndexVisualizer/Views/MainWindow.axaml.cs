@@ -1,6 +1,8 @@
 using System;
+using System.Collections.Specialized;
 using System.ComponentModel;
 using System.Linq;
+using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Interactivity;
 using Avalonia.Threading;
@@ -36,17 +38,28 @@ public partial class MainWindow : Window
     {
         if (_vm != null)
         {
-            _vm.ChartDataChanged   -= OnChartDataChanged;
-            _vm.PropertyChanged    -= OnVmPropertyChanged;
+            _vm.ChartDataChanged -= OnChartDataChanged;
+            _vm.PropertyChanged  -= OnVmPropertyChanged;
+            _vm.MaintenanceLog.CollectionChanged -= OnMaintenanceLogChanged;
         }
 
         _vm = DataContext as MainWindowViewModel;
 
         if (_vm != null)
         {
-            _vm.ChartDataChanged   += OnChartDataChanged;
-            _vm.PropertyChanged    += OnVmPropertyChanged;
+            _vm.ChartDataChanged += OnChartDataChanged;
+            _vm.PropertyChanged  += OnVmPropertyChanged;
+            _vm.MaintenanceLog.CollectionChanged += OnMaintenanceLogChanged;
         }
+    }
+
+    private void OnMaintenanceLogChanged(object? sender, NotifyCollectionChangedEventArgs e)
+    {
+        var sv = this.FindControl<ScrollViewer>("LogScrollViewer");
+        if (sv == null) return;
+        Dispatcher.UIThread.Post(
+            () => sv.Offset = new Vector(0, double.MaxValue),
+            DispatcherPriority.Background);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -94,28 +107,28 @@ public partial class MainWindow : Window
 
     private void OnReorganizeClick(object? sender, RoutedEventArgs e)
     {
-        if (GetIndexItemFromSender(sender) is { } item)
+        if (GetIndexItemFromSender(sender) is { } item && _vm != null)
         {
-            _vm!.SelectedIndexItem = item;
-            _vm.ReorganizeCommand.Execute(null);
+            _vm.SelectedIndexItem = item;
+            _vm.SelectedTabIndex  = 1;
         }
     }
 
     private void OnRebuildClick(object? sender, RoutedEventArgs e)
     {
-        if (GetIndexItemFromSender(sender) is { } item)
+        if (GetIndexItemFromSender(sender) is { } item && _vm != null)
         {
-            _vm!.SelectedIndexItem = item;
-            _vm.RebuildCommand.Execute(null);
+            _vm.SelectedIndexItem = item;
+            _vm.SelectedTabIndex  = 1;
         }
     }
 
     private void OnRebuildOnlineClick(object? sender, RoutedEventArgs e)
     {
-        if (GetIndexItemFromSender(sender) is { } item)
+        if (GetIndexItemFromSender(sender) is { } item && _vm != null)
         {
-            _vm!.SelectedIndexItem = item;
-            _vm.RebuildOnlineCommand.Execute(null);
+            _vm.SelectedIndexItem = item;
+            _vm.SelectedTabIndex  = 1;
         }
     }
 
