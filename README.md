@@ -1,22 +1,23 @@
 # SQL Index Visualizer
 
-A dark-mode Windows desktop app for visualising SQL Server index page density — built on [Avalonia](https://avaloniaui.net/) and [ScottPlot](https://scottplot.net/).
+A dark-mode Windows desktop app for visualising SQL Server index page density, fragmentation, and live page-split / lock-wait activity — built on [Avalonia](https://avaloniaui.net/) and [ScottPlot](https://scottplot.net/).
 
 ## What it does
 
-Connect to any SQL Server, pick a database, and right-click any index to run an analysis. The app samples every Nth page of the index and plots **page density** (how full each 8 KB page is) against **logical page order**, along with the average page read time in microseconds. The result is a visual signature of that index's physical state.
+Connect to any SQL Server, pick a database, select an index, and click **Analyse**. The app samples every Nth page of the index using `DBCC PAGE` and plots **page density** (how full each 8 KB page is) against **logical page order**, together with a rolling average and fill-factor reference line. The result is the "DNA" of that index's physical state.
 
-![SQL Index Visualizer screenshot](pictures/enh_02.jpg)
+![SQL Index Visualizer screenshot](pictures/enh_03.jpg)
 
 ### Why this matters
 
-Common wisdom says random GUIDs as primary keys cause catastrophic fragmentation. This tool lets you actually see what happens:
+`avg_fragmentation_in_percent` is a single number that hides *where* fragmentation lives. The scatter plot reveals the pattern:
 
-- **Random GUIDs** insert uniformly across the whole index, keeping pages consistently dense. Traditional fragmentation metrics mislead you.
-- **Sequential GUIDs (`NEWSEQUENTIALID`)** are probably not the answer you're looking for.
-- **Reorganize** generates orders-of-magnitude more transaction log usage than Rebuild — and you can watch the density chart before and after to compare.
-
-The scatter plot shows the real shape of your index. The rolling average line reveals trends. The fill-factor reference line tells you whether maintenance is even needed.
+| Pattern | Meaning |
+| --- | --- |
+| Uniform high density | Healthy, rarely updated index — raise the fill factor |
+| Last-page density drop | Sequential inserts (identity / `NEWSEQUENTIALID`) — only the tail needs attention |
+| Density variable throughout | Random key inserts (NEWID GUIDs) or distributed updates — lower fill factor globally |
+| Mid-range density dip | Deletes without re-inserts — REORGANIZE is sufficient |
 
 ## Prerequisites
 
@@ -25,7 +26,7 @@ The scatter plot shows the real shape of your index. The rolling average line re
 | .NET 10 SDK | [Download](https://dotnet.microsoft.com/download/dotnet/10.0) |
 | Windows | WinExe target; Avalonia Desktop |
 | SQL Server 2008+ | Windows auth (Trusted Connection) |
-| `sysadmin` or `CONTROL SERVER` | Required to run `DBCC PAGE` internally |
+| `sysadmin` or `CONTROL SERVER` | Required for `DBCC PAGE` |
 
 ## Build & run
 
@@ -41,10 +42,17 @@ Or open `SQLIndexVisualizer.slnx` in Visual Studio 2022 (17.12+) or Rider and hi
 
 1. **Connect** — enter your server name (default: `localhost`) and click **Connect**.
 2. **Load** — select a database from the dropdown and click **Load** to populate the index tree.
-3. **Analyse** — right-click any index and choose **Analyze Index**. The app samples the index pages and plots density. Large indexes can take several minutes.
-4. **Maintain** — click **Reorganize**, **Rebuild**, or **Rebuild Online** to open a confirmation dialog where you can review or change the fill factor before executing. After maintenance the index is re-analyzed automatically so you can compare before/after density.
+3. **Analyse** — select any index in the tree and click **Analyse**. The app samples the index pages and plots density. Large indexes can take several minutes.
+4. **Maintenance tab** — two sub-tabs:
+   - **Ola** — pre-filled `dbo.IndexOptimize` call (Ola Hallengren) for the selected index; edit parameters and click Execute.
+   - **T-SQL** — free-form editor that runs against the selected database; select text to execute only the selection.
+5. **Activity tab** — measure page splits and lock waits caused by a specific action:
+   - Select an index, click **Set Baseline** to snapshot `sys.dm_db_index_operational_stats`.
+   - Run your T-SQL (inserts, updates, etc.) in the Maintenance tab.
+   - Click **Measure** — the delta (splits and lock waits) appears in the bar chart and history table.
+   - Each Measure advances the baseline, so every action shows its own delta independently.
 
-## Chart legend
+## Chart legend (Analysis tab)
 
 | Series | Colour | Meaning |
 | --- | --- | --- |
@@ -55,20 +63,25 @@ Or open `SQLIndexVisualizer.slnx` in Visual Studio 2022 (17.12+) or Rider and hi
 
 ## Stats bar
 
-After analysis the stats bar shows: pages sampled, average/min/max page density, fill factor, average free space, index fragmentation (when available), and **average page read time in µs** (`bReadMicroSec` from `DBCC PAGE`). Page read time is zero for pages already in the buffer pool — this is expected on a warm server.
+After analysis: pages sampled, table row count, index size, average / min / max page density, fill factor, average free space, index fragmentation (`sys.dm_db_index_physical_stats`), and average page read time in µs (`bReadMicroSec` from `DBCC PAGE`). Page read time is zero for pages already in the buffer pool — expected on a warm server.
 
-## Examples
+## Activity tab metrics
 
-The `scripts/` folder contains:
+Both counters come from `sys.dm_db_index_operational_stats`, measured as before/after deltas:
 
-| File | Purpose |
-| --- | --- |
-| `IndexPageInfo.sql` | The inline T-SQL used to sample index pages |
+| Metric | Source column | What it means |
+| --- | --- | --- |
+| **Page Splits** | `leaf_allocation_count` | New leaf pages allocated — each split leaves a ~50 % full page |
+| **Lock Waits** | `row_lock_wait_count` + `page_lock_wait_count` | Lock acquisitions that blocked — high numbers indicate contention |
+
+## Scripts
+
+The `scripts/` folder contains `IndexPageInfo.sql` — the T-SQL used to sample index pages (same logic as the embedded query).
 
 ## Stack
 
 - [Avalonia 12](https://avaloniaui.net/) — cross-platform XAML UI framework
-- [ScottPlot 5](https://scottplot.net/) — high-performance scatter plotting
+- [ScottPlot 5](https://scottplot.net/) — high-performance plotting
 - [Microsoft.Data.SqlClient 5](https://github.com/dotnet/SqlClient) — SQL Server connectivity
 - [CommunityToolkit.Mvvm 8](https://github.com/CommunityToolkit/dotnet) — MVVM source generators
 

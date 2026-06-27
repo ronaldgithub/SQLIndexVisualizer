@@ -32,22 +32,7 @@
             <TextBlock Text="{Binding DisplayName}"
                        FontSize="12"
                        Foreground="#DCDCDC"
-                       Padding="2,2">
-                <TextBlock.ContextMenu>
-                    <ContextMenu>
-                        <MenuItem Header="Analyze Index"
-                                  Click="OnAnalyzeClick"
-                                  FontWeight="Bold"/>
-                        <Separator/>
-                        <MenuItem Header="Reorganize Index"
-                                  Click="OnReorganizeClick"/>
-                        <MenuItem Header="Rebuild Index (Offline)"
-                                  Click="OnRebuildClick"/>
-                        <MenuItem Header="Rebuild Index (ONLINE)"
-                                  Click="OnRebuildOnlineClick"/>
-                    </ContextMenu>
-                </TextBlock.ContextMenu>
-            </TextBlock>
+                       Padding="2,2"/>
         </DataTemplate>
     </Window.DataTemplates>
 
@@ -217,7 +202,8 @@
                 <TreeView x:Name="IndexTree"
                           ItemsSource="{Binding TableGroups}"
                           Background="Transparent"
-                          Padding="4,0,4,4"/>
+                          Padding="4,0,4,4"
+                          SelectionChanged="OnTreeViewSelectionChanged"/>
             </DockPanel>
 
             <!-- ── Splitter ── -->
@@ -236,22 +222,25 @@
                         Padding="14,10">
                     <Grid ColumnDefinitions="*,Auto">
                         <StackPanel Grid.Column="0" Spacing="2">
-                            <TextBlock Text="{Binding CurrentIndexInfo.FullName, FallbackValue='SQL Index Visualizer'}"
+                            <TextBlock Text="{Binding InfoTitle}"
                                        FontSize="16" FontWeight="Bold" Foreground="White"/>
                             <StackPanel Orientation="Horizontal" Spacing="16">
-                                <TextBlock Text="{Binding CurrentIndexInfo.ServerName, StringFormat='Server: {0}', FallbackValue=''}"
-                                           FontSize="11" Foreground="#888"/>
-                                <TextBlock Text="{Binding CurrentIndexInfo.DBName, StringFormat='DB: {0}', FallbackValue=''}"
-                                           FontSize="11" Foreground="#888"/>
-                                <TextBlock Text="{Binding CurrentIndexInfo.SampleDT, StringFormat='Sampled: {0}', FallbackValue=''}"
-                                           FontSize="11" Foreground="#888"/>
+                                <TextBlock Text="{Binding ServerName, StringFormat='Server: {0}'}"
+                                           FontSize="11" Foreground="#888"
+                                           IsVisible="{Binding IsConnected}"/>
+                                <TextBlock Text="{Binding SelectedDatabase, StringFormat='DB: {0}'}"
+                                           FontSize="11" Foreground="#888"
+                                           IsVisible="{Binding SelectedDatabase, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"/>
+                                <TextBlock Text="{Binding CurrentIndexInfo.SampleDT, StringFormat='Sampled: {0}'}"
+                                           FontSize="11" Foreground="#888"
+                                           IsVisible="{Binding CurrentIndexInfo.SampleDT, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"/>
                             </StackPanel>
                         </StackPanel>
 
                         <!-- Action buttons -->
                         <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="6"
                                     VerticalAlignment="Center">
-                            <Button Content="⟳  Re-Analyze"
+                            <Button Content="⟳  Analyse"
                                     Command="{Binding ReAnalyzeCommand}"
                                     Classes="accent" FontSize="12"/>
                             <Button Content="✕ Cancel"
@@ -269,11 +258,23 @@
                         BorderThickness="0,0,0,1"
                         Padding="14,8"
                         IsVisible="{Binding HasData}">
-                    <StackPanel Orientation="Horizontal" Spacing="30">
+                    <ScrollViewer HorizontalScrollBarVisibility="Auto"
+                                  VerticalScrollBarVisibility="Disabled">
+                    <StackPanel Orientation="Horizontal" Spacing="20">
                         <StackPanel Spacing="1">
                             <TextBlock Text="Pages Sampled" FontSize="10" Foreground="#888"/>
                             <TextBlock Text="{Binding TotalPagesSampled, StringFormat='{}{0:N0}'}"
                                        FontSize="20" FontWeight="Bold" Foreground="White"/>
+                        </StackPanel>
+                        <StackPanel Spacing="1">
+                            <TextBlock Text="Row Count" FontSize="10" Foreground="#888"/>
+                            <TextBlock Text="{Binding TableRowCount, StringFormat='{}{0:N0}'}"
+                                       FontSize="20" FontWeight="Bold" Foreground="White"/>
+                        </StackPanel>
+                        <StackPanel Spacing="1">
+                            <TextBlock Text="Index Size" FontSize="10" Foreground="#888"/>
+                            <TextBlock Text="{Binding IndexSizeDisplay}"
+                                       FontSize="20" FontWeight="Bold" Foreground="#9CDCFE"/>
                         </StackPanel>
                         <StackPanel Spacing="1">
                             <TextBlock Text="Avg Page Density" FontSize="10" Foreground="#888"/>
@@ -311,6 +312,7 @@
                                        FontSize="20" FontWeight="Bold" Foreground="#B8D7A3"/>
                         </StackPanel>
                     </StackPanel>
+                    </ScrollViewer>
                 </Border>
 
                 <!-- ── Tab area: Analysis | Maintenance ── -->
@@ -337,7 +339,7 @@
                                                FontSize="14" HorizontalAlignment="Center" Foreground="#666"/>
                                     <TextBlock Text="2.  Select a database and click Load"
                                                FontSize="14" HorizontalAlignment="Center" Foreground="#666"/>
-                                    <TextBlock Text="3.  Right-click an index → Analyze Index"
+                                    <TextBlock Text="3.  Select an index and click Analyse"
                                                FontSize="14" HorizontalAlignment="Center" Foreground="#666"/>
                                 </StackPanel>
                             </Border>
@@ -494,7 +496,8 @@
                                         <Border Background="#0D1117"
                                                 BorderBrush="#30363D"
                                                 BorderThickness="0">
-                                            <TextBox Text="{Binding CustomSql}"
+                                            <TextBox x:Name="TsqlEditor"
+                                                     Text="{Binding CustomSql}"
                                                      AcceptsReturn="True"
                                                      TextWrapping="NoWrap"
                                                      FontFamily="Cascadia Code,Consolas,Courier New"
@@ -532,6 +535,133 @@
                                     </ItemsControl.ItemTemplate>
                                 </ItemsControl>
                             </ScrollViewer>
+
+                        </Grid>
+                    </TabItem>
+
+                    <!-- ── Tab 2: Activity ── -->
+                    <TabItem Header="Activity">
+                        <Grid RowDefinitions="Auto,*,Auto">
+
+                            <!-- Controls row -->
+                            <Border Grid.Row="0"
+                                    Background="{StaticResource SectionBg}"
+                                    BorderBrush="{StaticResource BorderBrush}"
+                                    BorderThickness="0,0,0,1"
+                                    Padding="14,10">
+                                <StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+                                    <Button Content="Set Baseline"
+                                            Command="{Binding TakeBaselineCommand}"
+                                            Classes="accent"/>
+                                    <TextBox Text="{Binding MeasurementLabel}"
+                                             PlaceholderText="Action label (optional)"
+                                             Width="180" FontSize="13"/>
+                                    <Button Content="▶  Measure"
+                                            Command="{Binding MeasureCommand}"
+                                            Classes="success"/>
+                                    <Button Content="Clear"
+                                            Command="{Binding ClearMeasurementsCommand}"/>
+                                    <Rectangle Width="1" Fill="#3C3C3C" Margin="4,0"/>
+                                    <TextBlock Text="{Binding BaselineTime, StringFormat='Baseline: {0}'}"
+                                               IsVisible="{Binding HasBaseline}"
+                                               FontSize="12" Foreground="#9CDCFE"
+                                               VerticalAlignment="Center"/>
+                                    <!-- Legend (only when data exists) -->
+                                    <StackPanel Orientation="Horizontal" Spacing="6"
+                                                IsVisible="{Binding HasMeasurements}"
+                                                VerticalAlignment="Center"
+                                                Margin="8,0,0,0">
+                                        <Rectangle Width="12" Height="12" Fill="#4472C4" VerticalAlignment="Center"/>
+                                        <TextBlock Text="Page Splits" FontSize="11" Foreground="#888" VerticalAlignment="Center"/>
+                                        <Rectangle Width="12" Height="12" Fill="#E05252" Margin="10,0,0,0" VerticalAlignment="Center"/>
+                                        <TextBlock Text="Lock Waits" FontSize="11" Foreground="#888" VerticalAlignment="Center"/>
+                                    </StackPanel>
+                                </StackPanel>
+                            </Border>
+
+                            <!-- Bar chart — AvaPlot always visible (ScottPlot Skia init gotcha) -->
+                            <Grid Grid.Row="1">
+                                <sp:AvaPlot x:Name="ActivityChart"/>
+                                <!-- Opaque empty-state overlay -->
+                                <Border Background="#1E1E1E"
+                                        IsVisible="{Binding HasMeasurements, Converter={x:Static BoolConverters.Not}}">
+                                    <StackPanel VerticalAlignment="Center"
+                                                HorizontalAlignment="Center"
+                                                Spacing="10">
+                                        <TextBlock Text="📈" FontSize="48" HorizontalAlignment="Center"/>
+                                        <TextBlock Text="Page Splits &amp; Lock Waits Monitor"
+                                                   FontSize="18" FontWeight="SemiBold"
+                                                   HorizontalAlignment="Center" Foreground="#666"/>
+                                        <TextBlock Text="1.  Select an index in the tree"
+                                                   FontSize="13" HorizontalAlignment="Center" Foreground="#444"/>
+                                        <TextBlock Text="2.  Click Set Baseline"
+                                                   FontSize="13" HorizontalAlignment="Center" Foreground="#444"/>
+                                        <TextBlock Text="3.  Run a T-SQL action in the Maintenance tab"
+                                                   FontSize="13" HorizontalAlignment="Center" Foreground="#444"/>
+                                        <TextBlock Text="4.  Click Measure to capture the delta"
+                                                   FontSize="13" HorizontalAlignment="Center" Foreground="#444"/>
+                                    </StackPanel>
+                                </Border>
+                            </Grid>
+
+                            <!-- Measurements history table -->
+                            <Border Grid.Row="2"
+                                    Background="#111111"
+                                    BorderBrush="{StaticResource BorderBrush}"
+                                    BorderThickness="0,1,0,0"
+                                    IsVisible="{Binding HasMeasurements}"
+                                    MaxHeight="150">
+                                <ScrollViewer VerticalScrollBarVisibility="Auto"
+                                              HorizontalScrollBarVisibility="Disabled">
+                                    <StackPanel>
+                                        <!-- Header -->
+                                        <Grid ColumnDefinitions="*,90,90,100,70"
+                                              Margin="16,6,16,4">
+                                            <TextBlock Grid.Column="0" Text="Action"
+                                                       FontSize="10" Foreground="#666" FontWeight="Bold"/>
+                                            <TextBlock Grid.Column="1" Text="Page Splits"
+                                                       FontSize="10" Foreground="#666" FontWeight="Bold"
+                                                       HorizontalAlignment="Right"/>
+                                            <TextBlock Grid.Column="2" Text="Lock Waits"
+                                                       FontSize="10" Foreground="#666" FontWeight="Bold"
+                                                       HorizontalAlignment="Right"/>
+                                            <TextBlock Grid.Column="3" Text="Wait (ms)"
+                                                       FontSize="10" Foreground="#666" FontWeight="Bold"
+                                                       HorizontalAlignment="Right"/>
+                                            <TextBlock Grid.Column="4" Text="Time"
+                                                       FontSize="10" Foreground="#666" FontWeight="Bold"
+                                                       HorizontalAlignment="Right"/>
+                                        </Grid>
+                                        <ItemsControl ItemsSource="{Binding Measurements}">
+                                            <ItemsControl.ItemTemplate>
+                                                <DataTemplate DataType="{x:Type models:SplitLockMeasurement}">
+                                                    <Grid ColumnDefinitions="*,90,90,100,70"
+                                                          Margin="16,3,16,3">
+                                                        <TextBlock Grid.Column="0" Text="{Binding Label}"
+                                                                   FontSize="12" Foreground="#DCDCDC"/>
+                                                        <TextBlock Grid.Column="1"
+                                                                   Text="{Binding PageSplits, StringFormat='{}{0:N0}'}"
+                                                                   FontSize="12" Foreground="#4472C4"
+                                                                   HorizontalAlignment="Right"/>
+                                                        <TextBlock Grid.Column="2"
+                                                                   Text="{Binding LockWaits, StringFormat='{}{0:N0}'}"
+                                                                   FontSize="12" Foreground="#E05252"
+                                                                   HorizontalAlignment="Right"/>
+                                                        <TextBlock Grid.Column="3"
+                                                                   Text="{Binding WaitDisplay}"
+                                                                   FontSize="12" Foreground="#888"
+                                                                   HorizontalAlignment="Right"/>
+                                                        <TextBlock Grid.Column="4"
+                                                                   Text="{Binding TimeDisplay}"
+                                                                   FontSize="12" Foreground="#666"
+                                                                   HorizontalAlignment="Right"/>
+                                                    </Grid>
+                                                </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                        </ItemsControl>
+                                    </StackPanel>
+                                </ScrollViewer>
+                            </Border>
 
                         </Grid>
                     </TabItem>

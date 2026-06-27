@@ -91,12 +91,12 @@ public class SqlServerService
 
             group.Indexes.Add(new IndexItem
             {
-                Schema    = schema,
-                TableName = table,
-                IndexName = reader.GetString(2),
-                IndexId   = reader.GetInt32(3),
-                ObjectId  = reader.GetInt32(4),
-                IndexType = reader.GetString(5),
+                Schema     = schema,
+                TableName  = table,
+                IndexName  = reader.GetString(2),
+                IndexId    = reader.GetInt32(3),
+                ObjectId   = reader.GetInt32(4),
+                IndexType  = reader.GetString(5),
                 FillFactor = reader.GetByte(6)
             });
         }
@@ -157,6 +157,57 @@ public class SqlServerService
         cmd.Parameters.AddWithValue("@indexId", indexId);
         var result = await cmd.ExecuteScalarAsync(ct);
         return result is DBNull or null ? -1.0 : Convert.ToDouble(result);
+    }
+
+    public async Task<(long RowCount, double IndexSizeMB)> GetRowCountAndSizeAsync(
+        int objectId, int indexId, CancellationToken ct = default)
+    {
+        const string sql = """
+            SELECT
+                ISNULL((SELECT SUM(row_count)
+                        FROM sys.dm_db_partition_stats
+                        WHERE object_id = @objectId AND index_id <= 1), 0),
+                ISNULL(CAST((SELECT SUM(used_page_count)
+                             FROM sys.dm_db_partition_stats
+                             WHERE object_id = @objectId AND index_id = @indexId)
+                            * 8.0 / 1024 AS FLOAT), 0.0)
+            """;
+        await using var conn = new SqlConnection(_dbConnectionString);
+        await conn.OpenAsync(ct);
+        await using var cmd = new SqlCommand(sql, conn) { CommandTimeout = 30 };
+        cmd.Parameters.AddWithValue("@objectId", objectId);
+        cmd.Parameters.AddWithValue("@indexId",  indexId);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        if (await reader.ReadAsync(ct))
+            return (Convert.ToInt64(reader[0]), Convert.ToDouble(reader[1]));
+        return (0L, 0.0);
+    }
+
+    public async Task<IndexOperationalStats> GetIndexOperationalStatsAsync(
+        int objectId, int indexId, CancellationToken ct = default)
+    {
+        const string sql = """
+            SELECT
+                SUM(leaf_allocation_count),
+                SUM(nonleaf_allocation_count),
+                SUM(row_lock_wait_count),
+                SUM(page_lock_wait_count),
+                SUM(row_lock_wait_in_ms),
+                SUM(page_lock_wait_in_ms)
+            FROM sys.dm_db_index_operational_stats(DB_ID(), @objectId, @indexId, NULL)
+            """;
+        await using var conn = new SqlConnection(_dbConnectionString);
+        await conn.OpenAsync(ct);
+        await using var cmd = new SqlCommand(sql, conn) { CommandTimeout = 10 };
+        cmd.Parameters.AddWithValue("@objectId", objectId);
+        cmd.Parameters.AddWithValue("@indexId",  indexId);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        if (await reader.ReadAsync(ct) && !reader.IsDBNull(0))
+            return new IndexOperationalStats(
+                Convert.ToInt64(reader[0]), Convert.ToInt64(reader[1]),
+                Convert.ToInt64(reader[2]), Convert.ToInt64(reader[3]),
+                Convert.ToInt64(reader[4]), Convert.ToInt64(reader[5]));
+        return new IndexOperationalStats(0, 0, 0, 0, 0, 0);
     }
 
     public async Task ReorganizeIndexAsync(string schema, string table, string indexName,

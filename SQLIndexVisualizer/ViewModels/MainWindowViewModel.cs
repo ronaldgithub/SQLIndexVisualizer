@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -16,6 +17,26 @@ public partial class MainWindowViewModel : ViewModelBase
 {
     private readonly SqlServerService _sqlService = new();
     private CancellationTokenSource? _cts;
+
+    private static readonly string SaveDir =
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "SQLIndexVisualizer");
+    private static string OlaSqlPath    => Path.Combine(SaveDir, "ola_sql.txt");
+    private static string CustomSqlPath => Path.Combine(SaveDir, "custom_sql.txt");
+
+    public MainWindowViewModel()
+    {
+        if (File.Exists(CustomSqlPath))
+            _customSql = File.ReadAllText(CustomSqlPath);
+        if (File.Exists(OlaSqlPath))
+            _indexOptimizeSql = File.ReadAllText(OlaSqlPath);
+        _measurements.CollectionChanged += (_, _) => OnPropertyChanged(nameof(HasMeasurements));
+    }
+
+    private void SaveEditorText(string path, string content)
+    {
+        try { Directory.CreateDirectory(SaveDir); File.WriteAllText(path, content); }
+        catch { /* best-effort */ }
+    }
 
     // ── Connection ────────────────────────────────────────────────────────────
     [ObservableProperty] private string _serverName = "localhost";
@@ -38,6 +59,7 @@ public partial class MainWindowViewModel : ViewModelBase
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(HasFillFactor))]
+    [NotifyPropertyChangedFor(nameof(InfoTitle))]
     private IndexItem? _selectedIndexItem;
 
     [ObservableProperty]
@@ -46,6 +68,10 @@ public partial class MainWindowViewModel : ViewModelBase
     [NotifyPropertyChangedFor(nameof(RollingWindowSize))]
     private List<PageData> _pageData = new();
 
+    [ObservableProperty] private long _tableRowCount;
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IndexSizeDisplay))]
+    private double _indexSizeMb;
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(AvgFragmentation))]
     private double _avgPageDensity;
@@ -61,6 +87,21 @@ public partial class MainWindowViewModel : ViewModelBase
     [ObservableProperty] private string _currentSql     = string.Empty;
     [ObservableProperty] private string _elapsedSeconds = string.Empty;
 
+    // ── Activity monitor ─────────────────────────────────────────────────────
+    [ObservableProperty] private ObservableCollection<SplitLockMeasurement> _measurements = new();
+    [ObservableProperty] private bool   _hasBaseline;
+    [ObservableProperty] private string _baselineTime     = string.Empty;
+    [ObservableProperty] private string _measurementLabel = string.Empty;
+    private IndexOperationalStats? _baseline;
+
+    public bool HasMeasurements => Measurements.Count > 0;
+
+    public bool CanTakeBaseline() => IsConnected && SelectedIndexItem != null;
+    public bool CanMeasure()      => HasBaseline  && SelectedIndexItem != null;
+
+    // ── Chart refresh triggers ─────────────────────────────────────────────
+    public event EventHandler? ActivityChartChanged;
+
     // ── Maintenance ───────────────────────────────────────────────────────────
     [ObservableProperty] private string _indexOptimizeSql     = string.Empty;
     [ObservableProperty] private string _customSql            = "-- T-SQL runs against the selected database\r\n\r\nSELECT @@VERSION;";
@@ -74,8 +115,23 @@ public partial class MainWindowViewModel : ViewModelBase
     [ObservableProperty] private string _statusDb     = string.Empty;
     [ObservableProperty] private bool   _hasError;
 
+    // ── T-SQL selection delegate (set by code-behind) ────────────────────────
+    public Func<string?>? GetSelectedTsql { get; set; }
+
     // ── Chart refresh trigger ─────────────────────────────────────────────────
     public event EventHandler? ChartDataChanged;
+
+    public string InfoTitle => SelectedIndexItem != null
+        ? $"{SelectedIndexItem.FullTableName} → [{SelectedIndexItem.IndexName}]"
+        : "SQL Index Visualizer";
+
+    public string IndexSizeDisplay => IndexSizeMb switch
+    {
+        0    => "—",
+        var mb when mb >= 1024 => $"{mb / 1024:F1} GB",
+        var mb when mb < 1     => $"{mb * 1024:F0} KB",
+        var mb                 => $"{mb:F1} MB"
+    };
 
     public bool   HasData               => PageData.Count > 0;
     public bool   ShowEmptyState        => !HasData && !IsAnalyzing;
@@ -89,6 +145,18 @@ public partial class MainWindowViewModel : ViewModelBase
     {
         IndexOptimizeSql = BuildIndexOptimizeSql(value);
         MaintenanceLog.Clear();
+        ReAnalyzeCommand.NotifyCanExecuteChanged();
+        // Reset activity baseline — stats belong to a specific index
+        _baseline    = null;
+        HasBaseline  = false;
+        BaselineTime = string.Empty;
+        TakeBaselineCommand.NotifyCanExecuteChanged();
+        MeasureCommand.NotifyCanExecuteChanged();
+    }
+
+    partial void OnIsConnectedChanged(bool value)
+    {
+        TakeBaselineCommand.NotifyCanExecuteChanged();
     }
 
     partial void OnSelectedDatabaseChanged(string? value)
@@ -238,6 +306,7 @@ public partial class MainWindowViewModel : ViewModelBase
     {
         if (string.IsNullOrWhiteSpace(IndexOptimizeSql)) return;
 
+        SaveEditorText(OlaSqlPath, IndexOptimizeSql);
         SelectedTabIndex = 1;
         IsAnalyzing      = true;
         HasError         = false;
@@ -286,6 +355,8 @@ public partial class MainWindowViewModel : ViewModelBase
     {
         if (string.IsNullOrWhiteSpace(CustomSql)) return;
 
+        var sqlToRun = GetSelectedTsql?.Invoke() is { Length: > 0 } sel ? sel : CustomSql;
+        SaveEditorText(CustomSqlPath, CustomSql);
         SelectedTabIndex         = 1;
         MaintenanceSubTabIndex   = 1;
         IsAnalyzing              = true;
@@ -298,7 +369,7 @@ public partial class MainWindowViewModel : ViewModelBase
         {
             _cts = new CancellationTokenSource();
             await _sqlService.ExecuteWithMessagesAsync(
-                CustomSql,
+                sqlToRun,
                 msg =>
                 {
                     if (!string.IsNullOrWhiteSpace(msg))
@@ -340,14 +411,81 @@ public partial class MainWindowViewModel : ViewModelBase
     }
 
     // ─────────────────────────────────────────────────────────────────────────
+    //  Activity monitor commands
+    // ─────────────────────────────────────────────────────────────────────────
+
+    [RelayCommand(CanExecute = nameof(CanTakeBaseline))]
+    private async Task TakeBaselineAsync()
+    {
+        try
+        {
+            _baseline    = await _sqlService.GetIndexOperationalStatsAsync(
+                               SelectedIndexItem!.ObjectId, SelectedIndexItem.IndexId);
+            BaselineTime = DateTime.Now.ToString("HH:mm:ss");
+            HasBaseline  = true;
+            MeasureCommand.NotifyCanExecuteChanged();
+            StatusText   = $"Baseline captured for [{SelectedIndexItem.IndexName}] at {BaselineTime}";
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"Baseline failed: {ex.Message}";
+        }
+    }
+
+    [RelayCommand(CanExecute = nameof(CanMeasure))]
+    private async Task MeasureAsync()
+    {
+        try
+        {
+            var after = await _sqlService.GetIndexOperationalStatsAsync(
+                            SelectedIndexItem!.ObjectId, SelectedIndexItem.IndexId);
+
+            var m = new SplitLockMeasurement
+            {
+                Label      = string.IsNullOrWhiteSpace(MeasurementLabel)
+                                 ? $"#{Measurements.Count + 1}"
+                                 : MeasurementLabel,
+                PageSplits = after.LeafAllocations - _baseline!.LeafAllocations,
+                LockWaits  = (after.RowLockWaits  + after.PageLockWaits)
+                           - (_baseline.RowLockWaits + _baseline.PageLockWaits),
+                LockWaitMs = (after.RowLockWaitMs + after.PageLockWaitMs)
+                           - (_baseline.RowLockWaitMs + _baseline.PageLockWaitMs),
+                MeasuredAt = DateTime.Now
+            };
+            Measurements.Add(m);
+            MeasurementLabel = string.Empty;
+            _baseline = after;   // advance baseline for the next delta
+            ActivityChartChanged?.Invoke(this, EventArgs.Empty);
+            StatusText = $"{m.Label}: {m.PageSplits:N0} splits, {m.LockWaits:N0} lock waits";
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"Measure failed: {ex.Message}";
+        }
+    }
+
+    [RelayCommand]
+    private void ClearMeasurements()
+    {
+        Measurements.Clear();
+        _baseline    = null;
+        HasBaseline  = false;
+        BaselineTime = string.Empty;
+        MeasureCommand.NotifyCanExecuteChanged();
+        ActivityChartChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
     //  Core analysis
     // ─────────────────────────────────────────────────────────────────────────
 
     private async Task RunAnalysisAsync(IndexItem item)
     {
-        IsAnalyzing = true;
-        HasError    = false;
-        PageData    = new List<PageData>();
+        IsAnalyzing    = true;
+        HasError       = false;
+        TableRowCount  = 0;
+        IndexSizeMb    = 0;
+        PageData       = new List<PageData>();
         ChartDataChanged?.Invoke(this, EventArgs.Empty);
 
         StatusText = $"Analyzing {item.FullTableName} → [{item.IndexName}]… This may take several minutes.";
@@ -358,12 +496,21 @@ public partial class MainWindowViewModel : ViewModelBase
 
             CurrentSql = $"-- Table: {item.FullTableName}  Index: [{item.IndexName}] (ID: {item.IndexId})\r\nDECLARE @pObjectID INT = {item.ObjectId};\r\nDECLARE @pIndexID  INT = {item.IndexId};";
 
-            var fragTask = _sqlService.GetIndexFragmentationAsync(item.ObjectId, item.IndexId, _cts.Token);
+            var fragTask    = _sqlService.GetIndexFragmentationAsync(item.ObjectId, item.IndexId, _cts.Token);
+            var statsTask   = _sqlService.GetRowCountAndSizeAsync(item.ObjectId, item.IndexId, _cts.Token);
 
             var pages = await _sqlService.AnalyzeIndexAsync(item.ObjectId, item.IndexId, _cts.Token);
 
             try   { IndexFragmentation = await fragTask; }
             catch { IndexFragmentation = -1; }
+
+            try
+            {
+                var (rc, sz) = await statsTask;
+                TableRowCount = rc;
+                IndexSizeMb   = sz;
+            }
+            catch { /* non-critical */ }
 
             CurrentIndexInfo = new IndexInfo
             {

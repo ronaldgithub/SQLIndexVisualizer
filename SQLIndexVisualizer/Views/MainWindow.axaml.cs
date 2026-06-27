@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Collections.Specialized;
 using System.ComponentModel;
 using System.Linq;
@@ -7,6 +8,7 @@ using Avalonia.Controls;
 using Avalonia.Interactivity;
 using Avalonia.Threading;
 using ScottPlot;
+using ScottPlot.TickGenerators;
 using SPColor = ScottPlot.Color;
 using ScottPlot.Avalonia;
 using SQLIndexVisualizer.Models;
@@ -18,6 +20,7 @@ public partial class MainWindow : Window
 {
     private MainWindowViewModel? _vm;
     private AvaPlot?             _chart;
+    private AvaPlot?             _activityChart;
     private DispatcherTimer?     _elapsedTimer;
     private DateTime             _analysisStart;
 
@@ -32,6 +35,8 @@ public partial class MainWindow : Window
     {
         _chart = this.FindControl<AvaPlot>("IndexChart");
         if (_chart != null) ApplyDarkStyle(_chart.Plot);
+        _activityChart = this.FindControl<AvaPlot>("ActivityChart");
+        if (_activityChart != null) ApplyDarkStyle(_activityChart.Plot);
     }
 
     private void OnDataContextChanged(object? sender, EventArgs e)
@@ -47,9 +52,15 @@ public partial class MainWindow : Window
 
         if (_vm != null)
         {
-            _vm.ChartDataChanged += OnChartDataChanged;
-            _vm.PropertyChanged  += OnVmPropertyChanged;
+            _vm.ChartDataChanged    += OnChartDataChanged;
+            _vm.ActivityChartChanged += (_, _) => Dispatcher.UIThread.Post(RefreshActivityChart);
+            _vm.PropertyChanged     += OnVmPropertyChanged;
             _vm.MaintenanceLog.CollectionChanged += OnMaintenanceLogChanged;
+            _vm.GetSelectedTsql = () =>
+            {
+                var tb = this.FindControl<TextBox>("TsqlEditor");
+                return tb?.SelectedText is { Length: > 0 } s ? s : null;
+            };
         }
     }
 
@@ -68,10 +79,16 @@ public partial class MainWindow : Window
 
     private void OnVmPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (e.PropertyName != nameof(MainWindowViewModel.IsAnalyzing)) return;
-
-        if (_vm!.IsAnalyzing) StartSpinner();
-        else                  StopSpinner();
+        if (e.PropertyName == nameof(MainWindowViewModel.IsAnalyzing))
+        {
+            if (_vm!.IsAnalyzing) StartSpinner();
+            else                  StopSpinner();
+        }
+        else if (e.PropertyName == nameof(MainWindowViewModel.SelectedTabIndex)
+                 && _vm!.SelectedTabIndex == 2)
+        {
+            Dispatcher.UIThread.Post(RefreshActivityChart);
+        }
     }
 
     private void StartSpinner()
@@ -96,49 +113,14 @@ public partial class MainWindow : Window
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    //  Context menu handlers
+    //  TreeView selection
     // ─────────────────────────────────────────────────────────────────────────
 
-    private void OnAnalyzeClick(object? sender, RoutedEventArgs e)
+    private void OnTreeViewSelectionChanged(object? sender, SelectionChangedEventArgs e)
     {
-        if (GetIndexItemFromSender(sender) is { } item)
-            _vm?.AnalyzeIndexCommand.Execute(item);
-    }
-
-    private void OnReorganizeClick(object? sender, RoutedEventArgs e)
-    {
-        if (GetIndexItemFromSender(sender) is { } item && _vm != null)
-        {
+        if (_vm == null) return;
+        if (e.AddedItems.Count > 0 && e.AddedItems[0] is IndexItem item)
             _vm.SelectedIndexItem = item;
-            _vm.SelectedTabIndex  = 1;
-        }
-    }
-
-    private void OnRebuildClick(object? sender, RoutedEventArgs e)
-    {
-        if (GetIndexItemFromSender(sender) is { } item && _vm != null)
-        {
-            _vm.SelectedIndexItem = item;
-            _vm.SelectedTabIndex  = 1;
-        }
-    }
-
-    private void OnRebuildOnlineClick(object? sender, RoutedEventArgs e)
-    {
-        if (GetIndexItemFromSender(sender) is { } item && _vm != null)
-        {
-            _vm.SelectedIndexItem = item;
-            _vm.SelectedTabIndex  = 1;
-        }
-    }
-
-    private static IndexItem? GetIndexItemFromSender(object? sender)
-    {
-        // ContextMenu closes before Click fires, so mi.Parent is already detached.
-        // DataContext on the MenuItem is inherited from the DataTemplate and survives.
-        if (sender is MenuItem { DataContext: IndexItem idx })
-            return idx;
-        return null;
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -208,6 +190,63 @@ public partial class MainWindow : Window
         plot.Axes.SetLimitsX(0, xs.Max());
 
         _chart.Refresh();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  Activity chart rendering
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private void RefreshActivityChart()
+    {
+        // ActivityChart may not be in the visual tree until the Activity tab is first selected
+        _activityChart ??= this.FindControl<AvaPlot>("ActivityChart");
+        if (_activityChart == null || _vm == null) return;
+
+        var plot = _activityChart.Plot;
+        plot.Clear();
+        ApplyDarkStyle(plot);
+        plot.HideLegend();
+
+        var measurements = _vm.Measurements;
+        if (measurements.Count == 0) { _activityChart.Refresh(); return; }
+
+        const double groupWidth = 2.4;
+        const double barWidth   = 0.85;
+
+        var splitBars = new List<ScottPlot.Bar>();
+        var lockBars  = new List<ScottPlot.Bar>();
+
+        for (int i = 0; i < measurements.Count; i++)
+        {
+            double groupStart = i * groupWidth;
+            splitBars.Add(new ScottPlot.Bar
+            {
+                Position  = groupStart,
+                Value     = (double)measurements[i].PageSplits,
+                FillColor = SPColor.FromHex("#4472C4"),
+                Size      = barWidth,
+            });
+            lockBars.Add(new ScottPlot.Bar
+            {
+                Position  = groupStart + 1.0,
+                Value     = (double)measurements[i].LockWaits,
+                FillColor = SPColor.FromHex("#E05252"),
+                Size      = barWidth,
+            });
+        }
+
+        plot.Add.Bars(splitBars.ToArray());
+        plot.Add.Bars(lockBars.ToArray());
+
+        // Custom x-axis tick labels at group midpoints
+        var tickGen = new NumericManual();
+        for (int i = 0; i < measurements.Count; i++)
+            tickGen.AddMajor(i * groupWidth + 0.5, measurements[i].Label);
+        plot.Axes.Bottom.TickGenerator = tickGen;
+
+        plot.YLabel("Count");
+        plot.Axes.AutoScale();
+        _activityChart.Refresh();
     }
 
     // ─────────────────────────────────────────────────────────────────────────
